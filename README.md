@@ -621,9 +621,6 @@ circleci_to_gha/
 
 ---
 
-## License
-
-[Your License Here]
 
 ## Support
 
