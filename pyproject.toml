@@ -5,9 +5,23 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "circleci-to-gha"
 version = "0.1.0"
-description = "AI-powered CircleCI to GitHub Actions migration tool"
+description = "AI-powered CircleCI to GitHub Actions migration tool for Mozilla projects"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
+license = {text = "MPL-2.0"}
+keywords = ["circleci", "github-actions", "ci-cd", "migration", "mozilla", "devops"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
 dependencies = [
     "click>=8.1.7",
     "pyyaml>=6.0.1",
@@ -15,6 +29,12 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "rich>=13.7.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/mozilla/circleci-to-gha"
+Repository = "https://github.com/mozilla/circleci-to-gha"
+Issues = "https://github.com/mozilla/circleci-to-gha/issues"
+Documentation = "https://github.com/mozilla/circleci-to-gha#readme"
 
 [project.optional-dependencies]
 dev = [

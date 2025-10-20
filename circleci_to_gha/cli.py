@@ -14,6 +14,48 @@ load_dotenv()
 console = Console()
 
 
+def display_detected_requirements(metadata: dict) -> None:
+    """Display detected special requirements from config metadata."""
+    if metadata["has_dryrun"]:
+        console.print("[bold yellow]ℹ️  Detected dryrun/SQL validation patterns[/bold yellow]")
+        console.print("   This workflow will need:")
+        console.print("   • GCP_DRYRUN_SERVICE_ACCOUNT_EMAIL secret")
+        console.print("   • ID token authentication for Cloud Functions")
+        console.print("   • GOOGLE_GHA_ID_TOKEN environment variable export")
+        console.print()
+
+    if metadata["has_docker"]:
+        console.print("[bold yellow]ℹ️  Detected Docker builds[/bold yellow]")
+        console.print("   This will require a dataservices-infra PR for GAR access")
+        console.print()
+
+
+def display_workflow_list(workflows: dict) -> None:
+    """Display the list of generated workflow files."""
+    console.print(f"\n[bold cyan]📝 Generated {len(workflows)} workflow file(s):[/bold cyan]")
+    for filename in sorted(workflows.keys()):
+        console.print(f"   • {filename}")
+    console.print()
+
+
+def display_workflow_content(workflows: dict, mode: str = "preview") -> None:
+    """Display workflow YAML content.
+
+    Args:
+        workflows: Dictionary of filename -> content
+        mode: Either "preview" or "saved"
+    """
+    if mode == "preview":
+        header = "[bold yellow]Workflow Content (preview - not saved):[/bold yellow]"
+    else:
+        header = "[bold green]Saved Workflow Content:[/bold green]"
+
+    console.print(f"\n{header}")
+    for name, content in sorted(workflows.items()):
+        console.print(f"\n[bold cyan]═══ {name} ═══[/bold cyan]")
+        console.print(Markdown(f"```yaml\n{content}\n```"))
+
+
 @click.group()
 @click.version_option()
 def cli():
@@ -80,20 +122,7 @@ def migrate(repo: Path, output: Path, project_id: str, location: str, write: boo
 
             # Extract metadata to detect special requirements
             metadata = extract_config_metadata(config)
-
-            # Show detected requirements
-            if metadata["has_dryrun"]:
-                console.print("[bold yellow]ℹ️  Detected dryrun/SQL validation patterns[/bold yellow]")
-                console.print("   This workflow will need:")
-                console.print("   • GCP_DRYRUN_SERVICE_ACCOUNT_EMAIL secret")
-                console.print("   • ID token authentication for Cloud Functions")
-                console.print("   • GOOGLE_GHA_ID_TOKEN environment variable export")
-                console.print()
-
-            if metadata["has_docker"]:
-                console.print("[bold yellow]ℹ️  Detected Docker builds[/bold yellow]")
-                console.print("   This will require a dataservices-infra PR for GAR access")
-                console.print()
+            display_detected_requirements(metadata)
 
             # Parse CircleCI config
             circleci_config = parse_circleci_config(config)
@@ -120,17 +149,11 @@ def migrate(repo: Path, output: Path, project_id: str, location: str, write: boo
             normalized_workflows = {normalize_filename(name): content for name, content in workflows.items()}
 
             # Always show what workflow files will be created
-            console.print(f"\n[bold cyan]📝 Generated {len(normalized_workflows)} workflow file(s):[/bold cyan]")
-            for filename in sorted(normalized_workflows.keys()):
-                console.print(f"   • {filename}")
-            console.print()
+            display_workflow_list(normalized_workflows)
 
             if not write:
                 # Preview mode - show content without saving
-                console.print(f"[bold yellow]Workflow Content (preview - not saved):[/bold yellow]")
-                for name, content in sorted(normalized_workflows.items()):
-                    console.print(f"\n[bold cyan]═══ {name} ═══[/bold cyan]")
-                    console.print(Markdown(f"```yaml\n{content}\n```"))
+                display_workflow_content(normalized_workflows, mode="preview")
             else:
                 # Write mode - save files and show what was saved
                 if output is None:
@@ -147,10 +170,7 @@ def migrate(repo: Path, output: Path, project_id: str, location: str, write: boo
                     console.print("[bold yellow]⚠️  Warning: Saved filenames differ from generated[/bold yellow]")
 
                 # Show the content that was saved
-                console.print(f"\n[bold green]Saved Workflow Content:[/bold green]")
-                for name, content in sorted(saved_workflows.items()):
-                    console.print(f"\n[bold cyan]═══ {name} ═══[/bold cyan]")
-                    console.print(Markdown(f"```yaml\n{content}\n```"))
+                display_workflow_content(saved_workflows, mode="saved")
 
             console.print()
 
@@ -223,35 +243,6 @@ def checklist(repo: Path, project_id: str, location: str):
     except FileNotFoundError as e:
         console.print(f"[bold red]Error: {e}[/bold red]")
         raise click.Abort()
-
-
-@cli.command()
-@click.argument("repo-name")
-def infra_pr(repo_name: str):
-    """Generate dataservices-infra PR content for GAR access."""
-    console.print(f"[bold blue]Generating infra PR for {repo_name}...[/bold blue]")
-    
-    pr_content = f"""## Add GAR access for {repo_name}
-
-This PR adds the `{repo_name}` repository to the list of repositories 
-that can push images to Google Artifact Registry.
-
-### Changes
-- Added `{repo_name}` to the repository list in `data-artifacts/tf/prod/locals.tf`
-
-### Testing
-- [ ] Terraform plan shows expected changes
-- [ ] No other resources affected
-
-Related to CircleCI → GitHub Actions migration.
-"""
-    
-    console.print(Markdown(pr_content))
-    
-    # Save to file
-    pr_file = Path("infra-pr-content.md")
-    pr_file.write_text(pr_content)
-    console.print(f"\n[bold green]✓ PR content saved to {pr_file}[/bold green]")
 
 
 if __name__ == "__main__":
