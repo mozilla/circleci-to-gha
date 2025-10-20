@@ -6,7 +6,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from dotenv import load_dotenv
 
-from .config_parser import parse_circleci_config
+from .config_parser import parse_circleci_config, discover_circleci_configs
 from .ai_client import get_ai_client
 from .generator import generate_workflows, save_workflows
 
@@ -23,11 +23,11 @@ def cli():
 
 @cli.command()
 @click.option(
-    "--config",
-    "-c",
-    type=click.Path(exists=True, path_type=Path),
-    default=".circleci/config.yml",
-    help="Path to CircleCI config file",
+    "--repo",
+    "-r",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    default=".",
+    help="Path to repository to migrate (default: current directory)",
 )
 @click.option(
     "--project-id",
@@ -42,28 +42,46 @@ def cli():
     default="global",
     help="Google Cloud Location",
 )
-def analyze(config: Path, project_id: str, location: str):
+def analyze(repo: Path, project_id: str, location: str):
     """Analyze CircleCI config and generate migration plan using Gemini."""
-    console.print(f"[bold blue]Analyzing {config}...[/bold blue]")
+    try:
+        # Discover CircleCI configs
+        configs = discover_circleci_configs(repo)
 
-    # Parse CircleCI config
-    circleci_config = parse_circleci_config(config)
+        if len(configs) > 1:
+            console.print(f"[bold yellow]Found {len(configs)} CircleCI configs:[/bold yellow]")
+            for i, config in enumerate(configs, 1):
+                console.print(f"  {i}. {config.name}")
+            console.print()
 
-    # Get AI analysis
-    ai_client = get_ai_client(project_id=project_id, location=location)
-    analysis = ai_client.analyze_config(circleci_config)
+        # Analyze each config
+        ai_client = get_ai_client(project_id=project_id, location=location)
 
-    console.print("\n[bold green]Migration Analysis:[/bold green]")
-    console.print(Markdown(analysis))
+        for config in configs:
+            console.print(f"[bold blue]Analyzing {config.name}...[/bold blue]")
+
+            # Parse CircleCI config
+            circleci_config = parse_circleci_config(config)
+
+            # Get AI analysis
+            analysis = ai_client.analyze_config(circleci_config)
+
+            console.print(f"\n[bold green]Migration Analysis for {config.name}:[/bold green]")
+            console.print(Markdown(analysis))
+            console.print("\n" + "="*80 + "\n")
+
+    except FileNotFoundError as e:
+        console.print(f"[bold red]Error: {e}[/bold red]")
+        raise click.Abort()
 
 
 @cli.command()
 @click.option(
-    "--config",
-    "-c",
-    type=click.Path(exists=True, path_type=Path),
-    default=".circleci/config.yml",
-    help="Path to CircleCI config file",
+    "--repo",
+    "-r",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    default=".",
+    help="Path to repository to migrate (default: current directory)",
 )
 @click.option(
     "--output",
@@ -94,57 +112,77 @@ def analyze(config: Path, project_id: str, location: str):
     is_flag=True,
     help="Remove CircleCI config directory after generating workflows",
 )
-def generate(config: Path, output: Path, project_id: str, location: str, dry_run: bool, remove_circleci: bool):
+def generate(repo: Path, output: Path, project_id: str, location: str, dry_run: bool, remove_circleci: bool):
     """Generate GitHub Actions workflows from CircleCI config using Gemini."""
-    console.print(f"[bold blue]Generating workflows from {config}...[/bold blue]")
+    try:
+        # Discover CircleCI configs
+        configs = discover_circleci_configs(repo)
 
-    # Parse CircleCI config
-    circleci_config = parse_circleci_config(config)
+        if len(configs) > 1:
+            console.print(f"[bold yellow]Found {len(configs)} CircleCI configs:[/bold yellow]")
+            for i, config in enumerate(configs, 1):
+                console.print(f"  {i}. {config.name}")
+            console.print()
 
-    # Generate workflows using AI
-    ai_client = get_ai_client(project_id=project_id, location=location)
-    workflows = generate_workflows(ai_client, circleci_config)
+        # Generate workflows using AI
+        ai_client = get_ai_client(project_id=project_id, location=location)
 
-    if dry_run:
-        console.print("\n[bold yellow]Generated Workflows (dry-run):[/bold yellow]")
-        for name, content in workflows.items():
-            console.print(f"\n[bold]{name}[/bold]")
-            console.print(Markdown(f"```yaml\n{content}\n```"))
-    else:
-        # If output not specified, determine it from config file location
-        if output is None:
-            # Get the repo root (parent of .circleci directory)
-            repo_root = config.resolve().parent.parent
-            output = repo_root / ".github" / "workflows"
+        for config in configs:
+            console.print(f"[bold blue]Generating workflows from {config.name}...[/bold blue]")
 
-        save_workflows(workflows, output)
-        console.print(f"\n[bold green]✓ Workflows saved to {output}[/bold green]")
+            # Parse CircleCI config
+            circleci_config = parse_circleci_config(config)
+
+            # Generate workflows
+            workflows = generate_workflows(ai_client, circleci_config)
+
+            if dry_run:
+                console.print(f"\n[bold yellow]Generated Workflows from {config.name} (dry-run):[/bold yellow]")
+                for name, content in workflows.items():
+                    console.print(f"\n[bold]{name}[/bold]")
+                    console.print(Markdown(f"```yaml\n{content}\n```"))
+            else:
+                # If output not specified, determine it from repo path
+                if output is None:
+                    output = repo.resolve() / ".github" / "workflows"
+
+                save_workflows(workflows, output)
+                console.print(f"\n[bold green]✓ Workflows from {config.name} saved to {output}[/bold green]")
+                for filename in workflows.keys():
+                    console.print(f"  - {Path(filename).name}")
+
+            console.print()
 
         # Remove CircleCI config if requested
-        if remove_circleci:
+        if remove_circleci and not dry_run:
             import shutil
-            circleci_dir = config.resolve().parent
-            if circleci_dir.name == ".circleci":
+            circleci_dir = repo.resolve() / ".circleci"
+            if circleci_dir.exists():
                 try:
                     shutil.rmtree(circleci_dir)
                     console.print(f"[bold green]✓ Removed CircleCI config directory: {circleci_dir}[/bold green]")
                 except OSError as e:
                     console.print(f"[bold red]✗ Failed to remove CircleCI directory: {e}[/bold red]")
 
+    except FileNotFoundError as e:
+        console.print(f"[bold red]Error: {e}[/bold red]")
+        raise click.Abort()
+
 
 @cli.command()
 @click.option(
-    "--config",
-    "-c",
-    type=click.Path(exists=True, path_type=Path),
-    default=".circleci/config.yml",
-    help="Path to CircleCI config file",
+    "--repo",
+    "-r",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    default=".",
+    help="Path to repository to migrate (default: current directory)",
 )
 @click.option(
     "--project-id",
     envvar="GOOGLE_CLOUD_PROJECT",
     required=True,
     help="Google Cloud Project ID",
+    default="mozdata"
 )
 @click.option(
     "--location",
@@ -152,17 +190,34 @@ def generate(config: Path, output: Path, project_id: str, location: str, dry_run
     default="global",
     help="Google Cloud Location",
 )
-def checklist(config: Path, project_id: str, location: str):
+def checklist(repo: Path, project_id: str, location: str):
     """Generate migration checklist including infrastructure changes using Gemini."""
-    console.print(f"[bold blue]Generating migration checklist...[/bold blue]")
+    try:
+        # Discover CircleCI configs
+        configs = discover_circleci_configs(repo)
 
-    circleci_config = parse_circleci_config(config)
-    ai_client = get_ai_client(project_id=project_id, location=location)
+        if len(configs) > 1:
+            console.print(f"[bold yellow]Found {len(configs)} CircleCI configs:[/bold yellow]")
+            for i, config in enumerate(configs, 1):
+                console.print(f"  {i}. {config.name}")
+            console.print()
 
-    checklist = ai_client.generate_checklist(circleci_config)
+        # Generate checklist for each config
+        ai_client = get_ai_client(project_id=project_id, location=location)
 
-    console.print("\n[bold green]Migration Checklist:[/bold green]")
-    console.print(Markdown(checklist))
+        for config in configs:
+            console.print(f"[bold blue]Generating migration checklist for {config.name}...[/bold blue]")
+
+            circleci_config = parse_circleci_config(config)
+            checklist_content = ai_client.generate_checklist(circleci_config)
+
+            console.print(f"\n[bold green]Migration Checklist for {config.name}:[/bold green]")
+            console.print(Markdown(checklist_content))
+            console.print("\n" + "="*80 + "\n")
+
+    except FileNotFoundError as e:
+        console.print(f"[bold red]Error: {e}[/bold red]")
+        raise click.Abort()
 
 
 @cli.command()

@@ -2,6 +2,30 @@
 
 import yaml
 from pathlib import Path
+from typing import List
+
+
+def discover_circleci_configs(repo_path: Path) -> List[Path]:
+    """Discover all CircleCI configuration files in repository.
+
+    Args:
+        repo_path: Path to the repository root directory
+
+    Returns:
+        List of paths to CircleCI configuration files
+
+    Raises:
+        FileNotFoundError: If .circleci directory doesn't exist or no configs found
+    """
+    circleci_dir = repo_path / ".circleci"
+    if not circleci_dir.exists():
+        raise FileNotFoundError(f"No .circleci directory found in {repo_path}")
+
+    configs = list(circleci_dir.glob("*.yml")) + list(circleci_dir.glob("*.yaml"))
+    if not configs:
+        raise FileNotFoundError(f"No CircleCI configs found in {circleci_dir}")
+
+    return sorted(configs)
 
 
 def parse_circleci_config(config_path: Path) -> str:
