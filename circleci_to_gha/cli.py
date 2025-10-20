@@ -30,22 +30,29 @@ def cli():
     help="Path to CircleCI config file",
 )
 @click.option(
-    "--provider",
-    type=click.Choice(["claude", "gemini"]),
-    default="claude",
-    help="AI provider to use",
+    "--project-id",
+    envvar="GOOGLE_CLOUD_PROJECT",
+    required=True,
+    help="Google Cloud Project ID",
+    default="mozdata"
 )
-def analyze(config: Path, provider: str):
-    """Analyze CircleCI config and generate migration plan."""
+@click.option(
+    "--location",
+    envvar="GOOGLE_CLOUD_LOCATION",
+    default="global",
+    help="Google Cloud Location",
+)
+def analyze(config: Path, project_id: str, location: str):
+    """Analyze CircleCI config and generate migration plan using Gemini."""
     console.print(f"[bold blue]Analyzing {config}...[/bold blue]")
-    
+
     # Parse CircleCI config
     circleci_config = parse_circleci_config(config)
-    
+
     # Get AI analysis
-    ai_client = get_ai_client(provider)
+    ai_client = get_ai_client(project_id=project_id, location=location)
     analysis = ai_client.analyze_config(circleci_config)
-    
+
     console.print("\n[bold green]Migration Analysis:[/bold green]")
     console.print(Markdown(analysis))
 
@@ -62,39 +69,67 @@ def analyze(config: Path, provider: str):
     "--output",
     "-o",
     type=click.Path(path_type=Path),
-    default=".github/workflows",
-    help="Output directory for GitHub Actions workflows",
+    help="Output directory for GitHub Actions workflows (default: repo/.github/workflows)",
 )
 @click.option(
-    "--provider",
-    type=click.Choice(["claude", "gemini"]),
-    default="claude",
-    help="AI provider to use",
+    "--project-id",
+    envvar="GOOGLE_CLOUD_PROJECT",
+    required=True,
+    help="Google Cloud Project ID",
+    default="mozdata"
+)
+@click.option(
+    "--location",
+    envvar="GOOGLE_CLOUD_LOCATION",
+    default="global",
+    help="Google Cloud Location",
 )
 @click.option(
     "--dry-run",
     is_flag=True,
     help="Show generated workflows without saving",
 )
-def generate(config: Path, output: Path, provider: str, dry_run: bool):
-    """Generate GitHub Actions workflows from CircleCI config."""
+@click.option(
+    "--remove-circleci",
+    is_flag=True,
+    help="Remove CircleCI config directory after generating workflows",
+)
+def generate(config: Path, output: Path, project_id: str, location: str, dry_run: bool, remove_circleci: bool):
+    """Generate GitHub Actions workflows from CircleCI config using Gemini."""
     console.print(f"[bold blue]Generating workflows from {config}...[/bold blue]")
-    
+
     # Parse CircleCI config
     circleci_config = parse_circleci_config(config)
-    
+
     # Generate workflows using AI
-    ai_client = get_ai_client(provider)
+    ai_client = get_ai_client(project_id=project_id, location=location)
     workflows = generate_workflows(ai_client, circleci_config)
-    
+
     if dry_run:
         console.print("\n[bold yellow]Generated Workflows (dry-run):[/bold yellow]")
         for name, content in workflows.items():
             console.print(f"\n[bold]{name}[/bold]")
             console.print(Markdown(f"```yaml\n{content}\n```"))
     else:
+        # If output not specified, determine it from config file location
+        if output is None:
+            # Get the repo root (parent of .circleci directory)
+            repo_root = config.resolve().parent.parent
+            output = repo_root / ".github" / "workflows"
+
         save_workflows(workflows, output)
         console.print(f"\n[bold green]✓ Workflows saved to {output}[/bold green]")
+
+        # Remove CircleCI config if requested
+        if remove_circleci:
+            import shutil
+            circleci_dir = config.resolve().parent
+            if circleci_dir.name == ".circleci":
+                try:
+                    shutil.rmtree(circleci_dir)
+                    console.print(f"[bold green]✓ Removed CircleCI config directory: {circleci_dir}[/bold green]")
+                except OSError as e:
+                    console.print(f"[bold red]✗ Failed to remove CircleCI directory: {e}[/bold red]")
 
 
 @cli.command()
@@ -106,20 +141,26 @@ def generate(config: Path, output: Path, provider: str, dry_run: bool):
     help="Path to CircleCI config file",
 )
 @click.option(
-    "--provider",
-    type=click.Choice(["claude", "gemini"]),
-    default="claude",
-    help="AI provider to use",
+    "--project-id",
+    envvar="GOOGLE_CLOUD_PROJECT",
+    required=True,
+    help="Google Cloud Project ID",
 )
-def checklist(config: Path, provider: str):
-    """Generate migration checklist including infrastructure changes."""
+@click.option(
+    "--location",
+    envvar="GOOGLE_CLOUD_LOCATION",
+    default="global",
+    help="Google Cloud Location",
+)
+def checklist(config: Path, project_id: str, location: str):
+    """Generate migration checklist including infrastructure changes using Gemini."""
     console.print(f"[bold blue]Generating migration checklist...[/bold blue]")
-    
+
     circleci_config = parse_circleci_config(config)
-    ai_client = get_ai_client(provider)
-    
+    ai_client = get_ai_client(project_id=project_id, location=location)
+
     checklist = ai_client.generate_checklist(circleci_config)
-    
+
     console.print("\n[bold green]Migration Checklist:[/bold green]")
     console.print(Markdown(checklist))
 

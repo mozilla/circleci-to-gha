@@ -64,11 +64,1627 @@ jobs:
           service_account_name: my-repo
 ```
 
-Checklist:
+# Example 2 Successful Migration
 
- Add my-repo to dataservices-infra GAR access list
- Configure repository secrets: none needed (uses org-level vars)
- Test workflow on a branch first
- Verify Docker image pushes successfully
+```yaml
+version: 2.1
 
- 
+# See https://circleci.com/orbs/registry/orb/circleci/gcp-gcr
+orbs:
+  gcp-gcr: circleci/gcp-gcr@0.16.10
+
+jobs:
+  build:
+    docker:
+    - image: python:3.10
+    steps:
+    - checkout
+    - restore_cache:
+        keys:
+          # when lock files change, use increasingly general patterns to restore cache
+          - &cache_key
+            python-packages-v1-{{ .Branch }}-{{ checksum "requirements.in" }}-{{ checksum "requirements.txt" }}
+          - python-packages-v1-{{ .Branch }}-{{ checksum "requirements.in" }}-
+          - python-packages-v1-{{ .Branch }}-
+          - python-packages-v1-
+    - &build
+      run:
+        name: Build
+        command: |
+          python3.10 -m venv venv/
+          venv/bin/pip install --no-deps --progress-bar off --upgrade -r requirements.txt
+    - run:
+        name: ruff lint
+        command: venv/bin/ruff check jetstream
+    - run:
+        name: ruff format
+        command: venv/bin/ruff format --check jetstream
+    - run:
+        name: Mypy
+        command: venv/bin/mypy jetstream
+    - &authenticate
+      run:
+        name: Authenticate to GCP
+        command: |
+          export GOOGLE_APPLICATION_CREDENTIALS="/tmp/gcp.json"
+          echo 'export GOOGLE_APPLICATION_CREDENTIALS="/tmp/gcp.json"' >> "$BASH_ENV"
+          echo "$GCLOUD_SERVICE_KEY" > "$GOOGLE_APPLICATION_CREDENTIALS"
+    - run:
+        name: PyTest
+        command: venv/bin/pytest --ruff --ruff-format --ignore=jetstream/tests/integration/
+    - save_cache:
+        paths:
+        - venv/
+        key: *cache_key
+  integration:
+    docker:
+    - image: python:3.10
+    steps:
+    - checkout
+    - &skip_forked_pr
+      run:
+        name: Early return if this build is from a forked PR
+        command: |
+          if [ -n "$CIRCLE_PR_NUMBER" ]; then
+            echo "Cannot pass creds to forked PRs, so marking this step successful"
+            circleci step halt
+          fi
+    - &build
+      run:
+        name: Build
+        command: |
+          python3.10 -m venv venv/
+          venv/bin/pip install --no-deps --progress-bar off --upgrade -r requirements.txt
+    - &pytest_integration_test
+      run:
+        name: PyTest Integration Test
+        # Google's client libraries will check for GOOGLE_APPLICATION_CREDENTIALS
+        # and use a file in that location for credentials if present;
+        # See https://cloud.google.com/docs/authentication/production
+        command: |
+          export GOOGLE_APPLICATION_CREDENTIALS="/tmp/gcp.json"
+          echo "$GCLOUD_SERVICE_KEY_INTEGRATION_TEST" > "$GOOGLE_APPLICATION_CREDENTIALS"
+          venv/bin/pytest --ruff --ruff-format --integration jetstream/tests/integration/
+  deploy:
+    docker:
+      - image: python:3.10
+    steps:
+      - checkout
+      - run:
+          name: Install deployment tools
+          command: |
+            pip install --upgrade build setuptools wheel twine
+      - run:
+          name: Create the distribution files
+          command: |
+            python -m build --sdist
+      - run:
+          name: Upload to PyPI
+          command: |
+            # Relies on the TWINE_USERNAME and TWINE_PASSWORD environment variables configured at:
+            #   https://app.circleci.com/settings/project/github/mozilla/jetstream/environment-variables
+            # For more on twine, see:
+            #   https://twine.readthedocs.io/en/latest/
+            twine upload --skip-existing dist/*
+
+workflows:
+  version: 2.1
+  build-and-deploy:
+    jobs:
+      - build
+      - integration
+      - gcp-gcr/build-and-push-image:
+          gcloud-service-key: EXPERIMENTS_GCLOUD_SERVICE_KEY
+          requires:
+            - build
+            - integration
+          image: jetstream
+          filters:
+            branches:
+              only:
+                main
+  tagged-deploy:
+    jobs:
+      - deploy:
+          filters:
+            tags:
+              only: /[0-9]{4}.[0-9]{1,2}.[0-9]+/  # Calver: YYYY.M.MINOR
+            branches:
+              # Ignore all branches; this workflow should only run for tags.
+              ignore: /.*/
+```
+
+After migration:
+
+```yaml
+name: Jetstream Build and Deploy
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - '[0-9][0-9][0-9][0-9].[0-9]{1,2}.[0-9]+'
+  pull_request:
+    branches:
+      - main
+  merge_group:
+
+jobs:
+  build:
+    environment: GH Actions
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      - name: Build venv and install dependencies
+        run: |
+          python3.10 -m venv venv/
+          venv/bin/pip install --no-deps --progress-bar off --upgrade -r requirements.txt
+      - name: Ruff lint
+        run: venv/bin/ruff check jetstream
+      - name: Ruff format
+        run: venv/bin/ruff format --check jetstream
+      - name: Mypy
+        run: venv/bin/mypy jetstream
+      - name: Authenticate to GCP and Generate ID Token
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCPV2_GITHUB_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DRYRUN_SERVICE_ACCOUNT_EMAIL }}
+          token_format: 'id_token'
+          id_token_audience: 'https://us-central1-moz-fx-data-shared-prod.cloudfunctions.net/bigquery-etl-dryrun'
+          id_token_include_email: true
+      - name: Export ID Token for Python
+        run: echo "GOOGLE_GHA_ID_TOKEN=${{ steps.auth.outputs.id_token }}" >> $GITHUB_ENV
+      - name: PyTest
+        run: venv/bin/pytest --ruff --ruff-format --ignore=jetstream/tests/integration/ -n 8
+
+  integration:
+    permissions:
+      contents: read
+      id-token: write
+    environment: GH Actions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Build venv and install dependencies
+        run: |
+          python3.10 -m venv venv/
+          venv/bin/pip install --no-deps --progress-bar off --upgrade -r requirements.txt
+      - name: Authenticate to GCP (OIDC)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCPV2_GITHUB_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_INTEGRATION_SERVICE_ACCOUNT_EMAIL }}
+      - name: PyTest Integration Test
+        run: venv/bin/pytest --ruff --ruff-format --integration jetstream/tests/integration/ -n 8
+
+  deploy:
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: pypi
+      url: https://pypi.org/p/mozilla-jetstream
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install deployment tools
+        run: pip install --upgrade build setuptools wheel twine
+      - name: Build distribution files
+        run: python -m build --sdist
+      - name: Publish distribution 📦 to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  docker:
+    permissions:
+      contents: read
+      id-token: write
+    environment: GH Actions
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: [build, integration]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build . -t jetstream:latest
+      - name: Push Docker image to GAR
+        uses: mozilla-it/deploy-actions/docker-push@v3
+        with:
+          project_id: moz-fx-data-experiments
+          local_image: jetstream
+          image_repo_host: gcr.io
+          image_repo_path: moz-fx-data-experiments/jetstream
+          workload_identity_pool_project_number: ${{ vars.GCPV2_WORKLOAD_IDENTITY_POOL_PROJECT_NUMBER }}
+```
+
+# Example 3 Successful Migration
+
+```yaml
+orbs:
+  gcp-gcr: circleci/gcp-gcr@0.16.2
+
+version: 2.1
+
+jobs:
+  test:
+    docker:
+      - image: cimg/base:current  # https://circleci.com/developer/images/image/cimg/base
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Build image
+          command: make build
+      - run:
+          name: Test Code
+          command: make test
+      - run:
+          name: Lint
+          command: make lint
+
+workflows:
+  version: 2
+  public-data-report-etl-build:
+    jobs:
+      - test:
+          filters:
+            tags:
+              only: /.*/
+      - gcp-gcr/build-and-push-image:
+          context: data-eng-airflow-gcr
+          image: firefox-public-data-report-etl
+          filters:
+            branches:
+              only: main
+```
+
+After migration:
+
+```yaml
+name: Build and Deploy
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build image
+        run: make build
+      - name: Test code
+        run: make test
+      - name: Lint
+        run: make lint
+
+  build-and-push-image:
+    if: github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Build the Docker image
+        run: docker build . -t us-docker.pkg.dev/moz-fx-data-artifacts-prod/firefox-public-data-report-etl/firefox-public-data-report-etl:latest
+      - name: Push Docker image to GAR
+        uses: mozilla-it/deploy-actions/docker-push@v4.3.2
+        with:
+          project_id: moz-fx-data-artifacts-prod
+          image_tags: us-docker.pkg.dev/moz-fx-data-artifacts-prod/firefox-public-data-report-etl/firefox-public-data-report-etl:latest
+          workload_identity_pool_project_number: ${{ vars.GCPV2_WORKLOAD_IDENTITY_POOL_PROJECT_NUMBER }}
+          service_account_name: github-actions-artifact-pusher
+```
+
+# Example 3 Successful Migration
+
+```yaml
+# config.yml
+
+version: 2.1
+
+setup: true
+
+orbs:
+  path-filtering: circleci/path-filtering@1.3.0
+
+workflows:
+  filter-paths-main:
+    when:
+      and:
+        - equal: [main, << pipeline.git.branch >>]
+    jobs:
+      - path-filtering/filter:
+          base-revision: << pipeline.git.base_revision >>
+          config-path: .circleci/validation-config.yml
+          mapping: |
+            opmon/.* validate-opmon true
+            jetstream/.* validate-jetstream true
+            definitions/.* validate-metrics true
+            looker/.* validate-looker true
+            lib/metric-config-parser/.* validate-metric-config-parser true
+            lib/metric-config-parser/pyproject.toml deploy-metric-config-parser true
+  filter-paths-pr:
+    when:
+      and:
+        - not:
+            equal: [main, << pipeline.git.branch >>]
+    jobs:
+      - path-filtering/filter:
+          base-revision: main
+          config-path: .circleci/validation-config.yml
+          mapping: |
+            opmon/.* validate-opmon true
+            jetstream/.* validate-jetstream true
+            definitions/.* validate-metrics true
+            looker/.* validate-looker true
+            .* base-revision "main"
+            lib/metric-config-parser/.* validate-metric-config-parser true
+```
+
+
+```yaml
+# validation_config.yml
+
+version: 2.1
+
+parameters:
+  validate-opmon:
+    type: boolean
+    default: false
+  validate-jetstream:
+    type: boolean
+    default: false
+  validate-metrics:
+    type: boolean
+    default: false
+  validate-looker:
+    type: boolean
+    default: false
+  base-revision:
+    type: string
+    default: << pipeline.git.base_revision >>
+  validate-metric-config-parser:
+    type: boolean
+    default: false
+  deploy-metric-config-parser:
+    type: boolean
+    default: false
+
+executors:
+  metric-config-parser-executor:
+    docker:
+    - image: python:3.10
+    working_directory: ~/project/lib/metric-config-parser
+
+jobs:
+  validate-metrics:
+    docker:
+    - image: python:3.10
+    environment:
+      BASE_COMMIT: << pipeline.parameters.base-revision >>
+      REVISION_COMMIT: << pipeline.git.revision >>
+    steps:
+    - checkout
+    - run:
+        name: Build
+        command: |
+          pip install -r .script/requirements.txt
+          pip install lib/metric-config-parser
+    - &authenticate
+      run:
+        name: Authenticate to GCP
+        command: |
+          export GOOGLE_APPLICATION_CREDENTIALS="/tmp/gcp.json"
+          echo 'export GOOGLE_APPLICATION_CREDENTIALS="/tmp/gcp.json"' >> "$BASH_ENV"
+          echo "$GCLOUD_SERVICE_KEY" > "$GOOGLE_APPLICATION_CREDENTIALS"
+    - run:
+        name: Validate config files
+        command: |
+          changed_files=$(git diff --name-only $BASE_COMMIT..$REVISION_COMMIT -- 'definitions/*.toml' 'definitions/*.example.toml')
+          echo "Run validation on changed files: "
+          echo $changed_files
+          python3 .script/validate.py $changed_files --config_repos='.'
+  validate-opmon:
+    docker:
+    - image: gcr.io/moz-fx-data-experiments/opmon:latest
+    environment:
+      BASE_COMMIT: << pipeline.parameters.base-revision >>
+      REVISION_COMMIT: << pipeline.git.revision >>
+    steps:
+    - checkout
+    - *authenticate
+    - run:
+        name: Validate OpMon config files
+        command: |
+          changed_files=$(git diff --name-only $BASE_COMMIT..$REVISION_COMMIT -- 'opmon/*.toml' 'opmon/*.toml.example')
+          echo "Run validation on changed files: "
+          echo $changed_files
+          opmon validate_config --config_repos='.' --config_repos=opmon/ $changed_files
+  validate-jetstream:
+    docker:
+    - image: gcr.io/moz-fx-data-experiments/jetstream:latest
+    environment:
+      BASE_COMMIT: << pipeline.parameters.base-revision >>
+      REVISION_COMMIT: << pipeline.git.revision >>
+    steps:
+    - checkout
+    - *authenticate
+    - run:
+        name: Validate jetstream config files
+        command: |
+          changed_files=$(git diff --name-only $BASE_COMMIT..$REVISION_COMMIT -- 'jetstream/*.toml' 'jetstream/*.toml.example')
+          echo "Run validation on changed files: "
+          echo $changed_files
+          jetstream validate_config --config_repos='.' --config_repos='jetstream/' $changed_files
+  validate-looker:
+    docker:
+    - image: python:3.10
+    environment:
+      BASE_COMMIT: << pipeline.parameters.base-revision >>
+      REVISION_COMMIT: << pipeline.git.revision >>
+    steps:
+    - checkout
+    - run:
+        name: Build
+        command: |
+          pip install -r .script/requirements.txt
+          pip install lib/metric-config-parser
+    - *authenticate
+    - run:
+        name: Validate config files
+        command: |
+          changed_files=$(git diff --name-only $BASE_COMMIT..$REVISION_COMMIT -- 'looker/*.toml' 'looker/*.example.toml')
+          echo "Run validation on changed files: "
+          echo $changed_files
+          python3 .script/validate.py --config_repos='.' --config_repos=looker/ $changed_files
+  build-metric-config-parser:
+    executor: metric-config-parser-executor
+    steps:
+    - checkout:
+        path: ~/project
+    - restore_cache:
+        keys:
+          # when lock files change, use increasingly general patterns to restore cache
+          - &cache_key
+            python-packages-v2-{{ .Branch }}-{{ checksum "requirements.in" }}-{{ checksum "requirements.txt" }}
+          - python-packages-v2-{{ .Branch }}-{{ checksum "requirements.in" }}-
+          - python-packages-v2-{{ .Branch }}-
+          - python-packages-v2-
+    - &build
+      run:
+        name: Build
+        command: |
+          python3.10 -m venv venv/
+          venv/bin/python -m pip install --upgrade pip
+          venv/bin/pip install --progress-bar off --upgrade -r requirements.txt
+    - run:
+        name: ruff
+        command: venv/bin/ruff check metric_config_parser
+    - run:
+        name: ruff format
+        command: venv/bin/ruff format --check metric_config_parser
+    - run:
+        name: Mypy
+        command: venv/bin/mypy metric_config_parser
+    - run:
+        name: PyTest
+        command: venv/bin/pytest --ruff --ignore=metric_config_parser/tests/integration/
+    - save_cache:
+        paths:
+        - venv/
+        key: *cache_key
+  integration-metric-config-parser:
+    executor: metric-config-parser-executor
+    steps:
+    - checkout:
+        path: ~/project
+    - *build
+    - run:
+        name: PyTest Integration Test
+        command: |
+          venv/bin/pytest --ruff metric_config_parser/tests/integration/
+  rerun-jetstream:
+    docker:
+    - image: google/cloud-sdk
+    environment:
+      BASE_COMMIT: << pipeline.parameters.base-revision >>
+      REVISION_COMMIT: << pipeline.git.revision >>
+    steps:
+    - checkout
+    - &skip_forked_pr
+      run:
+        name: Early return if this build is from a forked PR
+        command: |
+          if [ -n "$CIRCLE_PR_NUMBER" ]; then
+            echo "Do not re-run analysis on forked PRs, so marking this step successful"
+            circleci step halt
+          fi
+    - run:
+        name: Authorize gcloud CLI
+        command: |
+          # required for parsing kubectl pod statuses
+          apt-get install jq -y
+          apt-get install uuid-runtime
+          export USE_GKE_GCLOUD_AUTH_PLUGIN=True
+          export GOOGLE_APPLICATION_CREDENTIALS="/tmp/gcp.json"
+          echo "$JETSTREAM_GCLOUD_SERVICE_KEY" > "$GOOGLE_APPLICATION_CREDENTIALS"
+          gcloud auth activate-service-account --key-file=$GOOGLE_APPLICATION_CREDENTIALS
+          gcloud config set project $GCLOUD_PROJECT
+          gcloud container clusters get-credentials jetstream --zone us-central1-a --project $GCLOUD_PROJECT
+    - run:
+        name: Rerun jetstream
+        command: |
+          echo "Skipping rerun in CircleCI, see Github Actions for this workflow."
+          # changed_files=$(git diff --name-only $BASE_COMMIT..$REVISION_COMMIT -- 'jetstream/*.toml' 'jetstream/*.toml.example')
+
+          # # determine slugs of configs that got changed; filter out outcomes and defaults
+          # params=""
+          # for config in $changed_files; do
+          #   slug=${config##*/}
+          #   slug="${slug%.*}"
+          #   if [ -e jetstream/"$slug".toml ]; then
+          #     params+="--experiment_slug=${slug} "
+          #   fi
+          # done
+
+          # echo "Latest change affected these experiments:"
+          # echo $params
+
+          # # stop running instances so that they do not interfere
+          # uuid=`uuidgen`
+          # pod_identifier="jetstream-${uuid}"
+          # kubectl delete pod -l app=$pod_identifier
+
+          # commit_message=$(git log --format=oneline -n 1 $CIRCLE_SHA1)
+          # if [[ "$commit_message" == *"[ci rerun-skip]"* ]] || [[ "$commit_message" == *"[ci rerun_skip]"* ]] || [[ "$commit_message" == *"[ci skip-rerun]"* ]] || [[ "$commit_message" == *"[ci skip_rerun]"* ]]; then
+          #   echo "Skip rerun for files:"
+          #   echo $changed_files
+
+          #   # start a new instance
+          #   kubectl run $pod_identifier --image=gcr.io/moz-fx-data-experiments/jetstream -l app=$pod_identifier --restart=Never --command -- jetstream rerun-skip $(echo $params)
+          # else
+          #   echo "Rerun changed files: "
+          #   echo $changed_files
+
+          #   # start a new instance
+          #   kubectl run $pod_identifier --image=gcr.io/moz-fx-data-experiments/jetstream -l app=$pod_identifier --restart=Never --command -- jetstream rerun --argo --return-status --recreate-enrollments $(echo $params)
+          #   # link to logs
+          #   cur_date=`date -u +%FT%TZ`
+          #   echo "Pod Logs: https://console.cloud.google.com/logs/query;query=resource.type%3D%22k8s_container%22%0Aresource.labels.project_id%3D%22moz-fx-data-experiments%22%0Aresource.labels.location%3D%22us-central1-a%22%0Aresource.labels.cluster_name%3D%22jetstream%22%0Aresource.labels.namespace_name%3D%22default%22?scrollTimestamp=$cur_date"
+          #   echo "Analysis Errors can be accessed via Redash: https://sql.telemetry.mozilla.org/dashboard/jetstream-errors?p_experiment=%25"
+          #   # wait for pod to finish and check status
+          # fi
+
+          # running=true
+          # while [ $running = true ]
+          # do
+          #   echo "Wait for jetstream to finish"
+          #   pod_status=`kubectl get pod -l app=$pod_identifier --no-headers -o custom-columns=":status.phase"`
+          #   if [ $pod_status = 'Succeeded' ] || [ $pod_status = 'Failed' ]; then
+          #     running=false
+          #   fi
+          #   sleep 10
+          # done
+          # # delete pod
+          # kubectl delete pod -l app=$pod_identifier
+          # if [ $pod_status = 'Failed' ]; then
+          #   echo "Error when running jetstream. Check the logs for more information."
+          #   exit 1
+          # elif [ $pod_status = 'Succeeded' ]; then
+          #   echo "Jetstream successfully completed."
+          # else
+          #   echo "Jetstream completed in unknown status. Please check the logs."
+          #   echo "Analysis Errors can be accessed via Redash: https://sql.telemetry.mozilla.org/dashboard/jetstream-errors?p_experiment=%25"
+          #   exit 1
+          # fi
+  deploy-metric-config-parser:
+    executor: metric-config-parser-executor
+    steps:
+      - checkout:
+          path: ~/project
+      - run:
+          name: Check for package version change in last commit before proceeding.
+          command: |
+            if git diff main HEAD~1 pyproject.toml | grep 'version'
+              then
+                echo "Found changes to package version dir, proceeding with deployment."
+              else
+                echo "No changes in package version. Skipping metric-config-parser deployment."
+                circleci-agent step halt
+            fi
+      - run:
+          name: Install deployment tools
+          command: |
+            pip install --upgrade build setuptools wheel twine
+      - run:
+          name: Create the distribution files
+          command: |
+            python3.10 -m build --sdist
+      - run:
+          name: Upload to PyPI
+          command: |
+            # Relies on the TWINE_USERNAME and TWINE_PASSWORD environment variables configured at:
+            #   https://circleci.com/gh/mozilla/metric-config-parser/edit#env-vars
+            # For more on twine, see:
+            #   https://twine.readthedocs.io/en/latest/
+            twine upload --skip-existing dist/*
+  nothing-to-do:
+    executor: metric-config-parser-executor
+    steps:
+      - run:
+          name: Placeholder job to prevent CircleCI error about no workflows to run.
+          command: |
+            echo "Does nothing, see https://github.com/CircleCI-Public/circleci-cli/issues/577"
+
+workflows:
+  version: 2
+  validate-metrics:
+    when: 
+      or: 
+        - << pipeline.parameters.validate-metrics >>
+    jobs:
+      - validate-metrics
+  validate-opmon:
+    when: 
+      or: 
+        - << pipeline.parameters.validate-opmon >>
+    jobs:
+      - validate-opmon
+  validate-jetstream:
+    when: 
+      or: 
+        - << pipeline.parameters.validate-jetstream >>
+    jobs:
+      - validate-jetstream
+  validate-looker:
+    when: 
+      or: 
+        - << pipeline.parameters.validate-looker >>
+    jobs:
+      - validate-looker
+  build-metric-config-parser:
+    when: 
+      or: 
+        - << pipeline.parameters.validate-metric-config-parser >>
+    jobs:
+      - build-metric-config-parser
+  integration-metric-config-parser:
+    when: 
+      or: 
+        - << pipeline.parameters.validate-metric-config-parser >>
+    jobs:
+      - integration-metric-config-parser
+  deploy-metric-config-parser:
+    when: 
+      or: 
+        - << pipeline.parameters.deploy-metric-config-parser >>
+    jobs:
+      - deploy-metric-config-parser
+  rerun-jetstream:
+    when: 
+      or: 
+        - << pipeline.parameters.validate-jetstream >>
+    jobs:
+      - rerun-jetstream:
+          filters:
+            branches:
+              only: main
+  nothing-to-do:
+    jobs:
+      - nothing-to-do
+```
+
+After migration:
+
+```yaml
+# auto_approve.yml
+
+name: "Auto approve"
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  changed:
+    uses: ./.github/workflows/changed-files.yml
+    with:
+      path_filter: |
+        definitions/*.toml
+        lib/
+        .github/
+        .circleci/
+
+  approve:
+    name: Auto approve PR if no metrics definitions changed
+    permissions:
+      pull-requests: write
+    runs-on: ubuntu-latest 
+    needs: changed
+    steps:
+    - uses: actions/github-script@v6
+      if: needs.changed.outputs.any_changed == 'false'
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          github.rest.pulls.createReview({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            pull_number: context.issue.number,
+            event: "APPROVE"
+          })
+    - name: Skip
+      if: needs.changed.outputs.any_changed == 'true'
+      run: |
+        echo "Metric definitions changed, needs manual review"
+        echo "Changed files: ${{ needs.changed.outputs.all_changed_files }}"
+```
+
+```yaml
+# build-docs.yml
+
+name: "Build docs"
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-docs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Setup python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+        cache: 'pip'
+    - name: Install dependencies
+      run: |
+        python3.10 -m venv venv/
+        venv/bin/python -m pip install -r .script/requirements.txt
+        venv/bin/python -m pip install lib/metric-config-parser
+    - name: Build docs
+      run: |
+        venv/bin/python .script/generate_docs.py \
+          --output_dir=generated_docs/
+        cd generated_docs/
+        PATH="../venv/bin:$PATH" mkdocs gh-deploy --force \
+          -m "[ci skip] Deployed {sha} with MkDocs version: {version}"
+```
+
+```yaml
+# changed-files.yml
+
+name: Get changed files
+
+on:
+  workflow_call:
+    inputs:
+      path_filter:
+        type: string
+        description: 'Path filter to look for changed files'
+        required: false
+        default: '**'
+    outputs:
+      any_changed:
+        description: 'Did any file matching optional path filter change? [true|false]'
+        value: ${{ jobs.changed.outputs.any_changed }}
+      all_changed_files:
+        description: 'List of changed files matching optional path filter'
+        value: ${{ jobs.changed.outputs.all_changed_files }}
+
+jobs:
+  changed:
+    runs-on: ubuntu-latest 
+    name: Get changed files
+    outputs:
+      any_changed: ${{ steps.changed-files-specific.outputs.any_changed }}
+      all_changed_files: ${{ steps.changed-files-specific.outputs.all_changed_files }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: Get changed files
+      id: changed-files-specific
+      uses: tj-actions/changed-files@24d32ffd492484c1d75e0c0b894501ddb9d30d62
+      with:
+        files: ${{ inputs.path_filter }}
+    - name: Print results
+      run: |
+        echo "Using path filter: ${{ inputs.path_filter }}"
+        echo "Did files change?: ${{ steps.changed-files-specific.outputs.any_changed }}"
+        echo "All changed files: ${{ steps.changed-files-specific.outputs.all_changed_files }}"
+```
+
+```yaml
+# deploy-metric-config-parser.yml
+
+# This workflow is based on the GH Actions docs on publishing python artifacts:
+# https://docs.github.com/en/actions/tutorials/build-and-test-code/python#publishing-to-package-registries
+
+name: "Deploy metric-config-parser"
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'lib/metric-config-parser/pyproject.toml'
+
+permissions:
+  contents: read
+
+jobs:
+  changed:
+    uses: ./.github/workflows/changed-files.yml
+    with:
+      path_filter: |
+        lib/metric-config-parser/pyproject.toml
+
+  check-version-change:
+    runs-on: ubuntu-latest
+    needs: changed
+    permissions:
+      contents: read
+    outputs:
+      proceed: ${{ steps.version_change.outputs.proceed }}
+    if: needs.changed.outputs.any_changed == 'true'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+    - id: version_change
+      name: Check for package version change in last commit before proceeding.
+      run: |
+        if git diff origin/main HEAD~1 -- ./lib/metric-config-parser/pyproject.toml | grep '\+version'
+          then
+            echo "Found changes to package version dir, proceeding with deployment."
+            echo "proceed=true" >> "GITHUB_OUTPUT"
+          else
+            echo "No changes in package version. Skipping metric-config-parser deployment."
+            echo "proceed=false" >> "GITHUB_OUTPUT"
+        fi
+
+  build-metric-config-parser:
+    runs-on: ubuntu-latest
+    needs: check-version-change
+    permissions:
+      contents: read
+    if: needs.check-version-change.outputs.proceed == 'true'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+    - name: Setup python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+        cache: 'pip'
+    - name: Install deployment tools
+      working-directory: ./lib/metric-config-parser
+      run: |
+        python3 -m pip install --upgrade pip build setuptools wheel
+    - name: Create the distribution files
+      working-directory: ./lib/metric-config-parser
+      run: |
+        python3.10 -m build --sdist
+    - name: Upload distribution
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-dist
+        path: ./lib/metric-config-parser/dist
+
+  deploy-metric-config-parser:
+    runs-on: ubuntu-latest
+    needs: build-metric-config-parser
+    permissions:
+      id-token: write
+      contents: read
+    environment:
+      name: pypi
+    steps:
+    - name: Retrieve release distribution
+      uses: actions/download-artifact@v4
+      with:
+        name: release-dist
+        path: dist/
+    - name: Publish to PyPi
+      uses: pypa/gh-action-pypi-publish@release/v1
+```
+
+```yaml
+# rerun-jetstream.yml
+
+name: "Rerun jetstream"
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'jetstream/**'
+
+jobs:
+  changed:
+    uses: ./.github/workflows/changed-files.yml
+    with:
+      path_filter: |
+        jetstream/**
+
+  rerun-jetstream:
+    runs-on: ubuntu-latest
+    needs: changed
+    permissions:
+      contents: read
+      id-token: write
+    if: needs.changed.outputs.any_changed == 'true'
+    env:
+      CLUSTER_NAME: 'jetstream-dev'
+      CLUSTER_ZONE: 'us-central1-c'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Authenticate to GCP
+      uses: google-github-actions/auth@v2
+      id: google_auth
+      with:
+        workload_identity_provider: ${{ vars.GCPV2_GITHUB_WORKLOAD_IDENTITY_PROVIDER }}
+        service_account: ${{ secrets.GCP_JETSTREAM_SERVICE_ACCOUNT_EMAIL }}
+        project_id: ${{ vars.GCLOUD_PROJECT }}
+        access_token_lifetime: 43200s
+    - name: Set up GKE
+      uses: google-github-actions/get-gke-credentials@v2
+      with:
+        cluster_name: ${{ env.CLUSTER_NAME }}
+        location: ${{ env.CLUSTER_ZONE }}
+    - name: Rerun jetstream
+      shell: bash
+      run: |
+        changed_files="${{ needs.changed.outputs.all_changed_files }}"
+
+        ERROR_DASHBOARD_URL="https://mozilla.cloud.looker.com/dashboards/246"
+
+        # determine slugs of configs that got changed; filter out outcomes and defaults
+        params=""
+        for config in $changed_files; do
+          slug=${config##*/}
+          slug="${slug%.*}"
+          if [ -e jetstream/"$slug".toml ]; then
+            params+="--experiment_slug=${slug} "
+          fi
+        done
+
+        echo "Latest change affected these experiments:"
+        echo $params
+
+        # stop running instances so that they do not interfere
+        uuid=`uuidgen`
+        pod_identifier="jetstream-${uuid}"
+        echo "Deleting pod [$pod_identifier]"
+        echo
+        kubectl delete pod -l app=$pod_identifier
+
+        cur_date=`date -u +%FT%TZ`
+        LOGS_URL="https://console.cloud.google.com/logs/query;query=resource.type%3D%22k8s_container%22%0Aresource.labels.cluster_name%3D%22${{ env.CLUSTER_NAME }}%22%0Aresource.labels.location%3D%22${{ env.CLUSTER_ZONE }}%22%0Aresource.labels.namespace_name%3D%22argo%22;cursorTimestamp=$curDate?project=${{ vars.GCLOUD_PROJECT }}"
+
+        commit_message="${{ github.event.head_commit.message }}"
+        echo "Checking commit message: $commit_message"
+        if [[ "$commit_message" == *"[ci rerun-skip]"* ]] || [[ "$commit_message" == *"[ci rerun_skip]"* ]] || [[ "$commit_message" == *"[ci skip-rerun]"* ]] || [[ "$commit_message" == *"[ci skip_rerun]"* ]]; then
+          echo "Skip rerun for files:"
+          echo $changed_files
+
+          echo "[$(date +%FT%T%Z)] Running command: 'jetstream rerun-skip $params'"
+
+          # start a new instance
+          kubectl run $pod_identifier --image=gcr.io/${{ vars.GCLOUD_PROJECT }}/jetstream -l app=$pod_identifier --restart=Never --command -- jetstream rerun-skip $params
+        else
+          echo "Rerun changed files: "
+          echo $changed_files
+
+          echo "[$(date +%FT%T%Z)] Running command: 'jetstream rerun --argo --return-status --recreate-enrollments $params'"
+
+          # start a new instance
+          kubectl run $pod_identifier --image=gcr.io/${{ vars.GCLOUD_PROJECT }}/jetstream -l app=$pod_identifier --restart=Never --command -- jetstream rerun --argo --return-status --recreate-enrollments $params
+          
+          # link to logs
+          echo "Pod Logs: $LOGS_URL"
+          echo "Analysis Errors can be accessed via Looker: $ERROR_DASHBOARD_URL"
+          # wait for pod to finish and check status
+        fi
+
+        running=true
+        while [ $running = true ]
+        do
+          echo "[$(date +%FT%T%Z)] Wait for jetstream to finish"
+          pod_status=`kubectl get pod -l app=$pod_identifier --no-headers -o custom-columns=":status.phase"`
+          if [ $pod_status = 'Succeeded' ] || [ $pod_status = 'Failed' ]; then
+            running=false
+          fi
+          sleep 10
+        done
+        # delete pod
+        echo "Deleting pod [$pod_identifier]"
+        echo
+        kubectl delete pod -l app=$pod_identifier
+        if [ $pod_status = 'Failed' ]; then
+          echo "[$(date +%FT%T%Z)] Error when running jetstream. Check the pod logs or error dashboard for more information."
+          echo "Pod Logs: $LOGS_URL"
+          echo "Analysis Errors dashboard: $ERROR_DASHBOARD_URL"
+          exit 1
+        elif [ $pod_status = 'Succeeded' ]; then
+          echo "[$(date +%FT%T%Z)] Jetstream successfully completed."
+        else
+          echo "[$(date +%FT%T%Z)] Jetstream completed in unknown status. Please check the pod logs or error dashboard."
+          echo "Pod Logs: $LOGS_URL"
+          echo "Analysis Errors dashboard: $ERROR_DASHBOARD_URL"
+          exit 1
+        fi
+```
+
+```yaml
+# rerun-skip-comment.yml
+
+name: "rerun-skip comment"
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  changed:
+    uses: ./.github/workflows/changed-files.yml
+    with:
+      path_filter: |
+        jetstream/defaults/*.toml
+
+  rerun_skip_comment:
+    name: Leave a comment if defaults have been changed
+    permissions:
+      pull-requests: write
+    runs-on: ubuntu-latest 
+    needs: changed
+    if: needs.changed.outputs.any_changed == 'true'
+    steps:
+    - uses: actions/github-script@v6
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          github.rest.issues.createComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+            body: "⚠️ Changing default metrics will cause all experiments that are currently live to get rerun after this change has been merged. This may come with a substantial cost. To skip reruns, add `[ci skip-rerun]` to the PR message."
+          })
+```
+
+```yaml
+# trigger-looker-dag.yml
+
+name: "Trigger Looker DAG"
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'definitions/**'
+      - 'looker/**'
+
+jobs:
+  looker-deploy:
+    name: Deploy Looker via Airflow DAG
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        id: auth
+        with:
+          workload_identity_provider: ${{ vars.GCPV2_GITHUB_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          project_id: ${{ vars.GCLOUD_PROJECT }}
+          token_format: id_token
+          id_token_audience: https://us-west1-moz-fx-telemetry-airflow-prod.cloudfunctions.net/ci-external-trigger
+          id_token_include_email: true
+          create_credentials_file: false
+
+      - name: Prepare DAG run note
+        run: |
+          echo "DAGRUN_NOTE=DAG triggered by **[${{ github.actor }}](https://github.com/${{ github.actor }})** from ${{ github.repository }} CI build [${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_ENV
+
+      - name: Trigger looker DAG in Airflow to deploy lookml
+        run: |
+          curl --location --request POST "https://us-west1-moz-fx-telemetry-airflow-prod.cloudfunctions.net/ci-external-trigger" \
+            -H "Authorization: bearer ${{ steps.auth.outputs.id_token }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"dagrun_note\": \"${DAGRUN_NOTE}\", \"dag_id\":\"looker\"}"
+```
+
+```yaml
+# validate-jetstream.yml
+
+name: "Validate jetstream"
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'jetstream/**'
+  push:
+    branches:
+      - main
+    paths:
+      - 'jetstream/**'
+
+jobs:
+  changed:
+    uses: ./.github/workflows/changed-files.yml
+    with:
+      path_filter: |
+        jetstream/**/*.toml
+        jetstream/**/*.toml.example
+
+  validate-jetstream:
+    runs-on: ubuntu-latest
+    container:
+      image: gcr.io/moz-fx-data-experiments/jetstream:latest
+    needs: changed
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    if: needs.changed.outputs.any_changed == 'true'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.head_ref }}
+    - name: Set safe directory
+      # workaround because actions/checkout's `set-safe-directory` flag doesn't work in containers
+      # this and `ref` above are needed because jetstream performs git operations
+      run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+    - name: Authenticate to GCP
+      uses: google-github-actions/auth@v2
+      id: auth
+      with:
+        workload_identity_provider: ${{ vars.GCPV2_GITHUB_WORKLOAD_IDENTITY_PROVIDER }}
+        service_account: ${{ secrets.GCP_DRYRUN_SERVICE_ACCOUNT_EMAIL }}
+        token_format: id_token
+        id_token_audience: https://us-central1-moz-fx-data-shared-prod.cloudfunctions.net/bigquery-etl-dryrun
+        id_token_include_email: true
+    - name: Export ID Token for Python
+      run: echo "GOOGLE_GHA_ID_TOKEN=${{ steps.auth.outputs.id_token }}" >> $GITHUB_ENV
+    - name: Validate jetstream config files
+      run: |
+        echo "Run validation on changed files: "
+        echo ${{ needs.changed.outputs.all_changed_files }}
+        echo "jetstream validate_config --config_repos='.' --config_repos=jetstream/ ${{ needs.changed.outputs.all_changed_files }}"
+        jetstream validate_config --config_repos='.' --config_repos=jetstream/ ${{ needs.changed.outputs.all_changed_files }}
+    - uses: actions/github-script@v6
+      if: ${{ github.event_name == 'pull_request' && success() }}
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          github.rest.issues.createComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+            body: "✅ Jetstream Validation is complete. Check the CI logs for this step for **Query SQL** and **data processing estimates**."
+          })
+```
+
+```yaml
+# validate-looker.yml
+
+name: "Validate Looker"
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'looker/**'
+  push:
+    branches:
+      - main
+    paths:
+      - 'looker/**'
+
+jobs:
+  changed:
+    uses: ./.github/workflows/changed-files.yml
+    with:
+      path_filter: |
+        looker/**/*.toml
+        looker/**/*.toml.example
+
+  validate-looker:
+    runs-on: ubuntu-latest
+    needs: changed
+    permissions:
+      id-token: write
+      contents: read
+    if: needs.changed.outputs.any_changed == 'true'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.head_ref }}
+    - name: Setup python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+        cache: 'pip'
+    - name: Build
+      run: |
+        python3 -m pip install -r .script/requirements.txt
+        python3 -m pip install lib/metric-config-parser
+    - name: Authenticate to GCP
+      uses: google-github-actions/auth@v2
+      id: auth
+      with:
+        workload_identity_provider: ${{ vars.GCPV2_GITHUB_WORKLOAD_IDENTITY_PROVIDER }}
+        service_account: ${{ secrets.GCP_DRYRUN_SERVICE_ACCOUNT_EMAIL }}
+        token_format: id_token
+        id_token_audience: https://us-central1-moz-fx-data-shared-prod.cloudfunctions.net/bigquery-etl-dryrun
+        id_token_include_email: true
+    - name: Export ID Token for Python
+      run: echo "GOOGLE_GHA_ID_TOKEN=${{ steps.auth.outputs.id_token }}" >> $GITHUB_ENV
+    - name: Validate Looker config files
+      run: |
+        echo "Run validation on changed files: "
+        echo ${{ needs.changed.outputs.all_changed_files }}
+        python3 .script/validate.py --config_repos='.' --config_repos=looker/ ${{ needs.changed.outputs.all_changed_files }}
+```
+
+```yaml
+# validate-metric-config-parser.yml
+
+name: "Validate metric-config-parser"
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'lib/metric-config-parser/**'
+  push:
+    branches:
+      - main
+      - gh-actions-migration
+    paths:
+      - 'lib/metric-config-parser/**'
+
+jobs:
+  changed:
+    uses: ./.github/workflows/changed-files.yml
+    with:
+      path_filter: |
+        lib/metric-config-parser/**
+
+  build-metric-config-parser:
+    runs-on: ubuntu-latest
+    needs: changed
+    permissions:
+      contents: read
+    if: needs.changed.outputs.any_changed == 'true'
+    steps:
+    - name: Changed Files tests
+      run: echo ${{ needs.changed.outputs.any_changed }} && echo ${{ needs.changed.outputs.all_changed_files }}
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        path: ~/project
+    - name: Setup python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+        cache: 'pip'
+    - name: restore_cache
+      uses: actions/cache@v3
+      with:
+        key: python-packages-v1-{{ .Branch }}-{{ checksum "requirements.in" }}-{{ checksum "requirements.txt" }}
+        path: venv/
+        # when lock files change, use increasingly general patterns to restore cache
+        restore-keys: |-
+          python-packages-v1-{{ .Branch }}-{{ checksum "requirements.in" }}-{{ checksum "requirements.txt" }}
+          python-packages-v1-{{ .Branch }}-{{ checksum "requirements.in" }}-
+          python-packages-v1-{{ .Branch }}-
+          python-packages-v1-
+    - name: Build
+      working-directory: ~/project/lib/metric-config-parser
+      run: |
+        python3.10 -m venv venv/
+        venv/bin/python -m pip install --upgrade pip
+        venv/bin/pip install --progress-bar off --upgrade -r requirements.txt
+    - name: Ruff check
+      working-directory: ~/project/lib/metric-config-parser
+      run: venv/bin/ruff check metric_config_parser
+    - name: Ruff format
+      working-directory: ~/project/lib/metric-config-parser
+      run: venv/bin/ruff format --check metric_config_parser
+    - name: Mypy
+      working-directory: ~/project/lib/metric-config-parser
+      run: venv/bin/mypy metric_config_parser
+    - name: PyTest
+      working-directory: ~/project/lib/metric-config-parser
+      run: venv/bin/pytest --ruff --ignore=metric_config_parser/tests/integration/
+
+  integration-metric-config-parser:
+    runs-on: ubuntu-latest
+    needs: changed
+    permissions:
+      contents: read
+    if: needs.changed.outputs.any_changed == 'true'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        path: ~/project
+    - name: Setup python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+        cache: 'pip'
+    - name: Build
+      working-directory: ~/project/lib/metric-config-parser
+      run: |
+        python3.10 -m venv venv/
+        venv/bin/python -m pip install --upgrade pip
+        venv/bin/pip install --progress-bar off --upgrade -r requirements.txt
+    - name: PyTest Integration Test
+      working-directory: ~/project/lib/metric-config-parser
+      run: venv/bin/pytest --ruff metric_config_parser/tests/integration/
+```
+
+```yaml
+# validate-metric-config-parser.yml
+
+name: "Validate metric-config-parser"
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'lib/metric-config-parser/**'
+  push:
+    branches:
+      - main
+      - gh-actions-migration
+    paths:
+      - 'lib/metric-config-parser/**'
+
+jobs:
+  changed:
+    uses: ./.github/workflows/changed-files.yml
+    with:
+      path_filter: |
+        lib/metric-config-parser/**
+
+  build-metric-config-parser:
+    runs-on: ubuntu-latest
+    needs: changed
+    permissions:
+      contents: read
+    if: needs.changed.outputs.any_changed == 'true'
+    steps:
+    - name: Changed Files tests
+      run: echo ${{ needs.changed.outputs.any_changed }} && echo ${{ needs.changed.outputs.all_changed_files }}
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        path: ~/project
+    - name: Setup python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+        cache: 'pip'
+    - name: restore_cache
+      uses: actions/cache@v3
+      with:
+        key: python-packages-v1-{{ .Branch }}-{{ checksum "requirements.in" }}-{{ checksum "requirements.txt" }}
+        path: venv/
+        # when lock files change, use increasingly general patterns to restore cache
+        restore-keys: |-
+          python-packages-v1-{{ .Branch }}-{{ checksum "requirements.in" }}-{{ checksum "requirements.txt" }}
+          python-packages-v1-{{ .Branch }}-{{ checksum "requirements.in" }}-
+          python-packages-v1-{{ .Branch }}-
+          python-packages-v1-
+    - name: Build
+      working-directory: ~/project/lib/metric-config-parser
+      run: |
+        python3.10 -m venv venv/
+        venv/bin/python -m pip install --upgrade pip
+        venv/bin/pip install --progress-bar off --upgrade -r requirements.txt
+    - name: Ruff check
+      working-directory: ~/project/lib/metric-config-parser
+      run: venv/bin/ruff check metric_config_parser
+    - name: Ruff format
+      working-directory: ~/project/lib/metric-config-parser
+      run: venv/bin/ruff format --check metric_config_parser
+    - name: Mypy
+      working-directory: ~/project/lib/metric-config-parser
+      run: venv/bin/mypy metric_config_parser
+    - name: PyTest
+      working-directory: ~/project/lib/metric-config-parser
+      run: venv/bin/pytest --ruff --ignore=metric_config_parser/tests/integration/
+
+  integration-metric-config-parser:
+    runs-on: ubuntu-latest
+    needs: changed
+    permissions:
+      contents: read
+    if: needs.changed.outputs.any_changed == 'true'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        path: ~/project
+    - name: Setup python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+        cache: 'pip'
+    - name: Build
+      working-directory: ~/project/lib/metric-config-parser
+      run: |
+        python3.10 -m venv venv/
+        venv/bin/python -m pip install --upgrade pip
+        venv/bin/pip install --progress-bar off --upgrade -r requirements.txt
+    - name: PyTest Integration Test
+      working-directory: ~/project/lib/metric-config-parser
+      run: venv/bin/pytest --ruff metric_config_parser/tests/integration/
+```
+
+```yaml
+# validate-metrics.yml
+
+name: "Validate Metrics"
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'definitions/**'
+  push:
+    branches:
+      - main
+    paths:
+      - 'definitions/**'
+
+jobs:
+  changed:
+    uses: ./.github/workflows/changed-files.yml
+    with:
+      path_filter: |
+        definitions/*.toml
+        definitions/*.toml.example
+
+  validate-metrics:
+    runs-on: ubuntu-latest
+    needs: changed
+    permissions:
+      id-token: write
+      contents: read
+    if: needs.changed.outputs.any_changed == 'true'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.head_ref }}
+    - name: Setup python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+        cache: 'pip'
+    - name: Build
+      run: |
+        python3 -m pip install -r .script/requirements.txt
+        python3 -m pip install lib/metric-config-parser
+    - name: Authenticate to GCP
+      uses: google-github-actions/auth@v2
+      id: auth
+      with:
+        workload_identity_provider: ${{ vars.GCPV2_GITHUB_WORKLOAD_IDENTITY_PROVIDER }}
+        service_account: ${{ secrets.GCP_DRYRUN_SERVICE_ACCOUNT_EMAIL }}
+        token_format: id_token
+        id_token_audience: https://us-central1-moz-fx-data-shared-prod.cloudfunctions.net/bigquery-etl-dryrun
+        id_token_include_email: true
+    - name: Export ID Token for Python
+      run: echo "GOOGLE_GHA_ID_TOKEN=${{ steps.auth.outputs.id_token }}" >> $GITHUB_ENV
+    - name: Validate metric config files
+      run: |
+        echo "Run validation on changed files: "
+        echo ${{ needs.changed.outputs.all_changed_files }}
+        python3 .script/validate.py --config_repos='.' ${{ needs.changed.outputs.all_changed_files }}
+```
+
+```yaml
+# validate-opmon.yml
+
+name: "Validate OpMon"
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'opmon/**'
+  push:
+    branches:
+      - main
+    paths:
+      - 'opmon/**'
+
+jobs:
+  changed:
+    uses: ./.github/workflows/changed-files.yml
+    with:
+      path_filter: |
+        opmon/**/*.toml
+        opmon/**/*.toml.example
+
+  validate-opmon:
+    runs-on: ubuntu-latest
+    container:
+      image: gcr.io/moz-fx-data-experiments/opmon:latest
+    needs: changed
+    if: needs.changed.outputs.any_changed == 'true'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Validate OpMon config files
+      run: |
+        echo "Run validation on changed files: "
+        echo ${{ needs.changed.outputs.all_changed_files }}
+        opmon validate_config --config_repos='.' --config_repos=opmon/ ${{ needs.changed.outputs.all_changed_files }}
+```
+
+# Checklist
+
+* Add my-repo to dataservices-infra GAR access list?
+* Configure repository secrets
+* Test workflow on a branch first
+* Verify Docker image pushes successfully
+

@@ -11,8 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     "click>=8.1.7",
     "pyyaml>=6.0.1",
-    "anthropic>=0.18.0",
-    "google-generativeai>=0.3.0",
+    "google-genai>=0.1.0",
     "python-dotenv>=1.0.0",
     "rich>=13.7.0",
 ]

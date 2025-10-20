@@ -2,14 +2,14 @@
 
 from pathlib import Path
 from typing import Dict
-from .ai_client import AIClient
+from .ai_client import GeminiClient
 
 
-def generate_workflows(ai_client: AIClient, circleci_config: str) -> Dict[str, str]:
-    """Generate GitHub Actions workflows using AI.
+def generate_workflows(ai_client: GeminiClient, circleci_config: str) -> Dict[str, str]:
+    """Generate GitHub Actions workflows using Gemini AI.
 
     Args:
-        ai_client: AI client instance (Claude or Gemini)
+        ai_client: Gemini AI client instance
         circleci_config: Raw CircleCI configuration as string
 
     Returns:
@@ -37,6 +37,9 @@ def save_workflows(workflows: Dict[str, str], output_dir: Path) -> None:
         raise OSError(f"Failed to create output directory {output_dir}: {e}")
 
     for filename, content in workflows.items():
+        # Strip any leading path components (AI might include .github/workflows/)
+        filename = Path(filename).name
+
         # Ensure .yml extension
         if not filename.endswith((".yml", ".yaml")):
             filename = f"{filename}.yml"
