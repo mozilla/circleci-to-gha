@@ -44,46 +44,32 @@ gcloud auth application-default login
 
 ## Usage
 
-### 1. Analyze CircleCI Configuration
+### Main Command: `migrate`
 
-Analyze a CircleCI config and get a migration plan:
-
-```bash
-# Analyze repo in current directory
-circleci-to-gha analyze
-
-# Analyze specific repo
-circleci-to-gha analyze --repo /path/to/repo
-```
-
-**Output:**
-- Migration complexity assessment
-- Required secrets and variables
-- Infrastructure changes needed (dataservices-infra PRs)
-- Manual verification steps
-
-**Note:** The tool automatically discovers all CircleCI config files in the `.circleci` directory. If multiple configs are found, it will analyze each one.
-
-### 2. Generate GitHub Actions Workflows
-
-Convert CircleCI config to GitHub Actions workflows:
+The `migrate` command analyzes CircleCI configs and generates GitHub Actions workflows in one step:
 
 ```bash
-# Basic usage - saves to <repo>/.github/workflows/
-circleci-to-gha generate
+# Migrate repo in current directory (writes files by default)
+circleci-to-gha migrate
 
-# Generate for specific repo
-circleci-to-gha generate --repo /path/to/repo
+# Preview without writing files
+circleci-to-gha migrate --no-write
 
-# Dry run - preview without saving
-circleci-to-gha generate --dry-run
+# Migrate specific repo
+circleci-to-gha migrate --repo /path/to/repo
+
+# Migrate and remove CircleCI config
+circleci-to-gha migrate --remove-circleci
 
 # Custom output directory
-circleci-to-gha generate --output /custom/path
-
-# Generate and remove CircleCI config
-circleci-to-gha generate --remove-circleci
+circleci-to-gha migrate --output /custom/path
 ```
+
+**What it does:**
+1. 📊 Analyzes all CircleCI configs in `.circleci` directory
+2. ⚙️ Generates GitHub Actions workflows
+3. 💾 Saves workflows to `.github/workflows/` (unless `--no-write`)
+4. Shows detailed migration analysis and generated files
 
 **Example Output:**
 
@@ -92,20 +78,32 @@ Found 2 CircleCI configs:
   1. config.yml
   2. config-nightly.yml
 
-Generating workflows from config.yml...
+================================================================================
+Processing config.yml
+================================================================================
 
-✓ Workflows from config.yml saved to /Users/anna/mydata/mozanalysis/.github/workflows
+📊 Analyzing config.yml...
+
+Migration Analysis:
+[Analysis details...]
+
+⚙️ Generating workflows from config.yml...
+
+✓ Workflows saved to /Users/anna/mydata/mozanalysis/.github/workflows
   - build.yml
   - deploy.yml
   - test.yml
 
-Generating workflows from config-nightly.yml...
-
-✓ Workflows from config-nightly.yml saved to /Users/anna/mydata/mozanalysis/.github/workflows
-  - nightly.yml
+================================================================================
+✓ Migration complete!
+================================================================================
 ```
 
-### 3. Generate Migration Checklist
+---
+
+### Additional Commands
+
+#### Generate Migration Checklist
 
 Get a detailed checklist for the migration:
 
@@ -115,6 +113,9 @@ circleci-to-gha checklist
 
 # Generate checklist for specific repo
 circleci-to-gha checklist --repo /path/to/repo
+
+# Save to file
+circleci-to-gha checklist > MIGRATION_CHECKLIST.md
 ```
 
 **Output:**
@@ -124,7 +125,7 @@ circleci-to-gha checklist --repo /path/to/repo
 - [ ] Manual verification steps
 - [ ] Testing recommendations
 
-### 4. Generate dataservices-infra PR Content
+#### Generate dataservices-infra PR Content
 
 Generate PR content for adding GAR access:
 
@@ -155,27 +156,20 @@ Related to CircleCI → GitHub Actions migration.
 
 Here's a step-by-step guide for migrating a repository:
 
-### Step 1: Analyze the Configuration
+### Step 1: Preview the Migration
 
 ```bash
 cd /path/to/your/repo
-circleci-to-gha analyze
+circleci-to-gha migrate --no-write
 ```
 
-Review the analysis output to understand:
-- What infrastructure changes are needed
+This will show you:
+- Migration analysis and complexity assessment
+- Generated workflows (preview only, no files written)
+- Required infrastructure changes
 - What secrets need to be configured
-- Complexity of the migration
 
-### Step 2: Generate Workflows (Dry Run)
-
-```bash
-circleci-to-gha generate --dry-run
-```
-
-Review the generated workflows to ensure they look correct.
-
-### Step 3: Generate Migration Checklist
+### Step 2: Generate Migration Checklist (Optional)
 
 ```bash
 circleci-to-gha checklist > MIGRATION_CHECKLIST.md
@@ -183,9 +177,9 @@ circleci-to-gha checklist > MIGRATION_CHECKLIST.md
 
 Save the checklist for tracking migration progress.
 
-### Step 4: Create Infrastructure PR (if needed)
+### Step 3: Create Infrastructure PR (if needed)
 
-If the analysis indicates Docker builds:
+If the analysis indicates Docker builds or Airflow DAG triggers:
 
 ```bash
 # Generate PR content
@@ -195,7 +189,7 @@ circleci-to-gha infra-pr your-repo-name > infra-pr-content.md
 # Follow the instructions in the generated PR content
 ```
 
-### Step 5: Configure Repository Secrets
+### Step 4: Configure Repository Secrets
 
 Based on the analysis, configure required secrets in GitHub:
 
@@ -205,17 +199,17 @@ Based on the analysis, configure required secrets in GitHub:
    - `GCP_DRYRUN_SERVICE_ACCOUNT_EMAIL` (if needed)
    - Any other secrets identified in the checklist
 
-### Step 6: Generate Final Workflows
+### Step 5: Generate Final Workflows
 
 ```bash
 # Generate and save workflows
-circleci-to-gha generate
+circleci-to-gha migrate
 
 # Or remove CircleCI config in one step
-circleci-to-gha generate --remove-circleci
+circleci-to-gha migrate --remove-circleci
 ```
 
-### Step 7: Test on a Branch
+### Step 6: Test on a Branch
 
 ```bash
 # Create a migration branch
@@ -434,40 +428,24 @@ git push origin main
 
 ### Commands
 
-#### `analyze`
+#### `migrate`
 
-Analyze CircleCI config and generate migration plan.
-
-```bash
-circleci-to-gha analyze [OPTIONS]
-
-Options:
-  -r, --repo PATH    Path to repository to migrate (default: current directory)
-  --project-id TEXT  Google Cloud Project ID (default: mozdata)
-  --location TEXT    Google Cloud Location (default: global)
-  --help             Show this message and exit
-```
-
-**Note:** Automatically discovers all CircleCI configs in the `.circleci` directory.
-
-#### `generate`
-
-Generate GitHub Actions workflows from CircleCI config.
+Analyze and generate GitHub Actions workflows in one step.
 
 ```bash
-circleci-to-gha generate [OPTIONS]
+circleci-to-gha migrate [OPTIONS]
 
 Options:
   -r, --repo PATH       Path to repository to migrate (default: current directory)
   -o, --output PATH     Output directory (default: <repo>/.github/workflows)
   --project-id TEXT     Google Cloud Project ID (default: mozdata)
   --location TEXT       Google Cloud Location (default: global)
-  --dry-run             Show generated workflows without saving
+  --write/--no-write    Write generated workflows to files (default: write)
   --remove-circleci     Remove CircleCI config directory after generating
   --help                Show this message and exit
 ```
 
-**Note:** Processes all CircleCI configs found in the `.circleci` directory.
+**Note:** Automatically discovers all CircleCI configs in the `.circleci` directory.
 
 #### `checklist`
 
@@ -509,27 +487,25 @@ Options:
 # Navigate to repository
 cd ~/projects/my-mozilla-repo
 
-# Analyze
-circleci-to-gha analyze
+# Preview migration (doesn't write files)
+circleci-to-gha migrate --no-write
 
-# Preview workflows
-circleci-to-gha generate --dry-run
-
-# Generate and clean up
-circleci-to-gha generate --remove-circleci
+# Generate workflows and remove CircleCI config
+circleci-to-gha migrate --remove-circleci
 ```
 
 ### Example 2: Complex Migration with Custom Settings
 
 ```bash
-# Use specific project and location
-circleci-to-gha analyze \
+# Use specific project and location with preview
+circleci-to-gha migrate \
   --repo /path/to/complex-repo \
   --project-id moz-fx-data-shared-prod \
-  --location us-central1
+  --location us-central1 \
+  --no-write
 
 # Generate to custom location
-circleci-to-gha generate \
+circleci-to-gha migrate \
   --repo /path/to/complex-repo \
   --output /tmp/workflows
 ```
@@ -541,7 +517,7 @@ circleci-to-gha generate \
 for repo in repo1 repo2 repo3; do
   echo "Migrating $repo..."
   cd ~/projects/$repo
-  circleci-to-gha generate
+  circleci-to-gha migrate
   circleci-to-gha infra-pr $repo > ~/migrations/$repo-infra-pr.md
 done
 ```

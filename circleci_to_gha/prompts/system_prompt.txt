@@ -420,23 +420,62 @@ jobs:
 
 ## PyPI Trusted Publishing
 
-Use OIDC instead of API tokens:
+Use OIDC instead of API tokens for secure PyPI publishing:
 
 ```yaml
 jobs:
   deploy:
-    runs-on: ubuntu-latest
     permissions:
-      id-token: write
       contents: read
+      id-token: write
     environment:
       name: pypi
       url: https://pypi.org/p/<package-name>
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: python -m build --sdist
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install build dependencies
+        run: pip install --upgrade build
+      - name: Build distribution files
+        run: python -m build --sdist
+      - name: Publish distribution 📦 to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
 ```
+
+### Key Points for PyPI Publishing
+
+- Use `id-token: write` permission for OIDC authentication
+- Set `environment: name: pypi` to use PyPI environment secrets
+- Only publish on tag pushes: `if: startsWith(github.ref, 'refs/tags/')`
+- Install only `build` package - **NEVER install or use `twine`**
+- Build source distribution: `python -m build --sdist`
+- Use trusted publishing action: `pypa/gh-action-pypi-publish@release/v1`
+- **No API tokens or credentials needed** - uses OpenID Connect (OIDC) authentication
+- The `pypa/gh-action-pypi-publish` action handles authentication automatically
+
+### CRITICAL: Do NOT Use Twine
+
+**NEVER include twine in PyPI publishing workflows:**
+- ❌ Do NOT install `twine` package
+- ❌ Do NOT run `twine upload` commands
+- ❌ Do NOT use `twine check` commands
+- ✅ ONLY use `pypa/gh-action-pypi-publish@release/v1` action
+
+The PyPI publish action replaces twine entirely. Twine is incompatible with OIDC Trusted Publishing and requires deprecated API tokens.
+
+### PyPI Setup Requirements
+
+Before this workflow will work, configure PyPI Trusted Publishing:
+1. Go to PyPI → Your Project → Settings → Publishing
+2. Add GitHub as a trusted publisher
+3. Specify: owner, repository name, workflow filename, environment name
+
+**Important:** Trusted Publishing eliminates the need for PyPI API tokens or credentials. The GitHub Actions workflow authenticates directly with PyPI using OIDC.
 
 ---
 
@@ -639,5 +678,12 @@ When analyzing or generating workflows, ensure you:
 6. ✅ Preserve job dependencies and workflow logic
 7. ✅ Add appropriate permissions blocks
 8. ✅ Use Mozilla-specific patterns shown above
+9. ✅ **NEVER use twine for PyPI publishing** - only use `pypa/gh-action-pypi-publish@release/v1`
 
 **Always generate complete, production-ready workflows following Mozilla's standards.**
+
+### Critical Rules
+
+- **PyPI Publishing:** NEVER install or use `twine`. Only use the `pypa/gh-action-pypi-publish@release/v1` action with OIDC authentication.
+- **Credentials:** No API tokens or credentials should be used for PyPI - only OIDC via `id-token: write` permission.
+- **Build Tools:** Only install `build` package for PyPI publishing, nothing else.

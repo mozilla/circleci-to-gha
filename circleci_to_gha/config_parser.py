@@ -39,13 +39,26 @@ def parse_circleci_config(config_path: Path) -> str:
 
     Raises:
         FileNotFoundError: If config file doesn't exist
-        yaml.YAMLError: If config file is not valid YAML
-    """
-    with open(config_path) as f:
-        raw_config = f.read()
 
-    # Validate that it's valid YAML
-    yaml.safe_load(raw_config)
+    Note:
+        Does not validate YAML syntax. Invalid YAML (like duplicate anchors)
+        will still be returned, allowing the AI to understand and convert it.
+    """
+    try:
+        with open(config_path) as f:
+            raw_config = f.read()
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+
+    # Try to validate YAML, but don't fail if it's invalid
+    # The AI can still understand and convert configs with YAML errors
+    try:
+        yaml.safe_load(raw_config)
+    except yaml.YAMLError as e:
+        # Just warn about YAML errors but continue
+        import sys
+        print(f"Warning: YAML validation error in {config_path.name}: {e}", file=sys.stderr)
+        print("Continuing anyway - AI will attempt to convert the config.", file=sys.stderr)
 
     return raw_config
 
@@ -60,6 +73,7 @@ def extract_config_metadata(config_path: Path) -> dict:
         Dictionary containing metadata about the configuration including:
         - has_docker: Whether Docker is used
         - has_gcp: Whether GCP/GAR is referenced
+        - has_dryrun: Whether dryrun patterns are detected (bigquery-etl, pytest --sql, etc.)
         - custom_orbs: List of custom orb names
         - jobs: List of job names
         - workflows: List of workflow names
@@ -70,15 +84,25 @@ def extract_config_metadata(config_path: Path) -> dict:
     """
     try:
         with open(config_path) as f:
-            config = yaml.safe_load(f)
+            raw_config = f.read()
+            config = yaml.safe_load(raw_config)
     except FileNotFoundError:
         raise FileNotFoundError(f"Config file not found: {config_path}")
-    except yaml.YAMLError as e:
-        raise yaml.YAMLError(f"Invalid YAML in config file: {e}")
+    except yaml.YAMLError:
+        # Return empty metadata if YAML is invalid
+        return {
+            "has_docker": False,
+            "has_gcp": False,
+            "has_dryrun": False,
+            "custom_orbs": [],
+            "jobs": [],
+            "workflows": [],
+        }
 
     metadata = {
         "has_docker": False,
         "has_gcp": False,
+        "has_dryrun": False,
         "custom_orbs": [],
         "jobs": list(config.get("jobs", {}).keys()) if config else [],
         "workflows": list(config.get("workflows", {}).keys()) if config else [],
@@ -97,6 +121,24 @@ def extract_config_metadata(config_path: Path) -> dict:
     raw_str = str(config)
     if "gcr.io" in raw_str or "pkg.dev" in raw_str or "gcp-gcr" in raw_str:
         metadata["has_gcp"] = True
+
+    # Check for dryrun patterns
+    # Look for common dryrun indicators in the raw config
+    dryrun_patterns = [
+        "bigquery-etl",
+        "dryrun",
+        "dry-run",
+        "dry_run",
+        "--sql",  # pytest --sql flag
+        "validate-sql",
+        "sql-validation",
+    ]
+
+    raw_lower = raw_config.lower()
+    for pattern in dryrun_patterns:
+        if pattern in raw_lower:
+            metadata["has_dryrun"] = True
+            break
 
     # Extract custom orbs
     orbs = config.get("orbs", {})

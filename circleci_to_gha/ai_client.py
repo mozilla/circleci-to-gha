@@ -37,11 +37,23 @@ class GeminiClient:
         return examples_path.read_text()
 
     def _call_gemini(self, user_message: str) -> str:
-        """Make API call to Gemini."""
+        """Make API call to Gemini with consistent generation config."""
+        from google.genai import types
+
         full_prompt = f"{self.system_prompt}\n\n{user_message}"
+
+        # Use lower temperature for more consistent, deterministic outputs
+        generation_config = types.GenerateContentConfig(
+            temperature=0.1,  # Low temperature for consistency (0.0-1.0)
+            top_p=0.95,       # Nucleus sampling
+            top_k=40,         # Top-k sampling
+            max_output_tokens=8192,
+        )
+
         response = self.client.models.generate_content(
             model=self.model,
             contents=full_prompt,
+            config=generation_config,
         )
         return response.text
 
@@ -53,12 +65,15 @@ CircleCI Config:
 ```yaml
 {circleci_config}
 ```
-Include:
 
- Repository secrets to configure
- Infrastructure changes needed (dataservices-infra PR)
- Workflow files to create
- Manual verification steps
+Provide a focused analysis including:
+1. **Required Secrets** - List all GitHub repository secrets needed
+2. **Infrastructure Changes** - Any dataservices-infra PRs needed (for Docker/GAR access, Airflow triggers, etc.)
+3. **Key Migration Points** - Important patterns to migrate (Docker, GCP auth, PyPI publishing, etc.)
+4. **Manual Verification Steps** - What to check after migration
+
+DO NOT list specific workflow filenames - those will be generated and shown separately.
+Focus on what needs to be configured and verified, not the file structure.
 """
         return self._call_gemini(prompt)
 
@@ -78,10 +93,23 @@ CircleCI Config:
 {circleci_config}
 ```
 
-Generate complete GitHub Actions workflow YAML file(s) following the patterns shown in the examples above.
-Return in format:
+IMPORTANT INSTRUCTIONS:
+1. Generate complete, production-ready GitHub Actions workflow YAML files
+2. Follow the exact patterns shown in the examples above
+3. Use OIDC authentication (never API tokens or credentials)
+4. For PyPI publishing: NEVER use twine - only use pypa/gh-action-pypi-publish@release/v1
+5. For Docker: Use mozilla-it/deploy-actions/docker-push@v4.3.2
+6. For ID tokens: Use token_format: 'id_token' and export GOOGLE_GHA_ID_TOKEN
+7. Preserve all job dependencies and workflow logic from CircleCI
+8. Use consistent naming: match CircleCI job names where possible
+
+Return in this exact format:
 FILENAME: <filename.yml>
-<workflow content>
+```yaml
+<complete workflow content>
+```
+
+Generate one workflow file per CircleCI workflow. Be consistent and deterministic.
 """
         response = self._call_gemini(prompt)
         return self._parse_workflows(response)
@@ -105,29 +133,51 @@ Include:
         return self._call_gemini(prompt)
 
     def _parse_workflows(self, response: str) -> dict[str, str]:
-        """Parse workflow files from AI response."""
+        """Parse workflow files from AI response.
+
+        Supports multiple formats:
+        - FILENAME: name.yml followed by ```yaml code block
+        - FILENAME: name.yml followed by raw YAML
+        """
         workflows = {}
         lines = response.split("\n")
         current_file = None
         current_content = []
         in_code_block = False
 
-        for line in lines:
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+
             if line.startswith("FILENAME:"):
+                # Save previous workflow if exists
                 if current_file and current_content:
-                    workflows[current_file] = "\n".join(current_content)
+                    # Clean up content - remove empty lines from start/end
+                    content = "\n".join(current_content).strip()
+                    workflows[current_file] = content
+
+                # Extract new filename
                 current_file = line.replace("FILENAME:", "").strip()
                 current_content = []
                 in_code_block = False
-            elif line.startswith("```yaml"):
+
+            elif line.startswith("```yaml") or line.startswith("```yml"):
                 in_code_block = True
+
             elif line.startswith("```") and in_code_block:
                 in_code_block = False
-            elif in_code_block and current_file:
-                current_content.append(line)
 
+            elif current_file:
+                # If we're in a code block, or if there's no code block yet, capture content
+                if in_code_block or (not any(l.startswith("```") for l in lines[max(0, i-5):i])):
+                    current_content.append(line)
+
+            i += 1
+
+        # Save last workflow
         if current_file and current_content:
-            workflows[current_file] = "\n".join(current_content)
+            content = "\n".join(current_content).strip()
+            workflows[current_file] = content
 
         return workflows
 

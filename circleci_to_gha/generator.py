@@ -21,12 +21,34 @@ def generate_workflows(ai_client: GeminiClient, circleci_config: str) -> Dict[st
     return ai_client.generate_workflow(circleci_config)
 
 
-def save_workflows(workflows: Dict[str, str], output_dir: Path) -> None:
+def normalize_filename(filename: str) -> str:
+    """Normalize workflow filename.
+
+    Args:
+        filename: Original filename from AI
+
+    Returns:
+        Normalized filename (basename with .yml extension)
+    """
+    # Strip any leading path components (AI might include .github/workflows/)
+    filename = Path(filename).name
+
+    # Ensure .yml extension
+    if not filename.endswith((".yml", ".yaml")):
+        filename = f"{filename}.yml"
+
+    return filename
+
+
+def save_workflows(workflows: Dict[str, str], output_dir: Path) -> Dict[str, str]:
     """Save generated workflows to disk.
 
     Args:
         workflows: Dictionary mapping filenames to workflow content
         output_dir: Directory to save workflow files
+
+    Returns:
+        Dictionary mapping normalized filenames to workflow content (what was actually saved)
 
     Raises:
         OSError: If directory creation or file writing fails
@@ -36,17 +58,18 @@ def save_workflows(workflows: Dict[str, str], output_dir: Path) -> None:
     except OSError as e:
         raise OSError(f"Failed to create output directory {output_dir}: {e}")
 
-    for filename, content in workflows.items():
-        # Strip any leading path components (AI might include .github/workflows/)
-        filename = Path(filename).name
+    saved_workflows = {}
 
-        # Ensure .yml extension
-        if not filename.endswith((".yml", ".yaml")):
-            filename = f"{filename}.yml"
+    for original_filename, content in workflows.items():
+        # Normalize the filename
+        filename = normalize_filename(original_filename)
 
         filepath = output_dir / filename
         try:
             filepath.write_text(content)
+            saved_workflows[filename] = content
         except OSError as e:
             raise OSError(f"Failed to write workflow file {filepath}: {e}")
+
+    return saved_workflows
         
