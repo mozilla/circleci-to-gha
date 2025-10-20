@@ -47,7 +47,7 @@ class GeminiClient:
             temperature=0.1,  # Low temperature for consistency (0.0-1.0)
             top_p=0.95,       # Nucleus sampling
             top_k=40,         # Top-k sampling
-            max_output_tokens=8192,
+            max_output_tokens=16384,  # Increased to handle complex workflows with many steps
         )
 
         response = self.client.models.generate_content(
@@ -103,6 +103,14 @@ IMPORTANT INSTRUCTIONS:
 7. Preserve all job dependencies and workflow logic from CircleCI
 8. Use consistent naming: match CircleCI job names where possible
 
+CRITICAL: GENERATE ALL STEPS COMPLETELY
+- You MUST generate EVERY step from the CircleCI configuration
+- Do NOT truncate, abbreviate, or skip any steps
+- Every step must be fully defined with ALL required fields (name, uses/run, with parameters, etc.)
+- Every workflow must have a proper closing - do not cut off mid-step or mid-file
+- If a CircleCI job has 10 steps, the GitHub Actions job must have ALL 10 steps
+- Complete each workflow file entirely before moving to the next one
+
 CRITICAL OUTPUT REQUIREMENTS:
 - Return ONLY valid YAML workflow files - NO commentary, explanations, or notes
 - DO NOT add bullet points, markdown text, or explanations after the YAML
@@ -124,7 +132,16 @@ Generate one workflow file per CircleCI workflow. Be consistent and deterministi
 NO TEXT OR COMMENTARY AFTER THE YAML CODE BLOCKS.
 """
         response = self._call_gemini(prompt)
-        return self._parse_workflows(response)
+        workflows = self._parse_workflows(response)
+
+        # Validate each workflow for completeness
+        import sys
+        for filename, content in workflows.items():
+            warnings = self._validate_workflow_completeness(filename, content)
+            for warning in warnings:
+                print(warning, file=sys.stderr)
+
+        return workflows
 
 
     def generate_checklist(self, circleci_config: str) -> str:
@@ -236,6 +253,56 @@ Include:
             content = "\n".join(lines_list[:last_yaml_idx + 1])
 
         return content.strip()
+
+    def _validate_workflow_completeness(self, filename: str, content: str) -> list[str]:
+        """Validate that workflow content is complete and not truncated.
+
+        Returns list of warnings if issues are detected.
+        """
+        warnings = []
+        lines = content.strip().split("\n")
+
+        if not lines:
+            warnings.append(f"⚠️  {filename}: Workflow is empty")
+            return warnings
+
+        last_line = lines[-1].strip()
+
+        # Check for incomplete steps (common signs of truncation)
+        truncation_indicators = [
+            "...",  # Ellipsis indicating continuation
+            "# TODO",  # Placeholder comments
+            "# ...",  # Comment ellipsis
+        ]
+
+        for indicator in truncation_indicators:
+            if indicator in last_line:
+                warnings.append(
+                    f"⚠️  {filename}: Workflow may be incomplete - ends with '{indicator}'"
+                )
+
+        # Check for unclosed structures
+        indent_level = len(last_line) - len(last_line.lstrip())
+        if indent_level > 2:  # Deep indentation suggests we're mid-structure
+            warnings.append(
+                f"⚠️  {filename}: Workflow may be incomplete - ends with deep indentation"
+            )
+
+        # Check if last line looks like it's mid-definition
+        if last_line.endswith(":"):
+            warnings.append(
+                f"⚠️  {filename}: Workflow may be incomplete - ends with colon (incomplete definition)"
+            )
+
+        # Try basic YAML validation
+        try:
+            import yaml
+            yaml.safe_load(content)
+        except yaml.YAMLError as e:
+            error_msg = str(e).split("\n")[0]  # First line of error
+            warnings.append(f"⚠️  {filename}: YAML validation error - {error_msg}")
+
+        return warnings
 
 
 def get_ai_client(project_id: str, location: str = "global") -> GeminiClient:

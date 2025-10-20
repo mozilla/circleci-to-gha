@@ -431,8 +431,10 @@ name: Tagged Deploy
 
 on:
   push:
+    branches:
+      - main
     tags:
-      - '*'  # Trigger on any tag
+      - '[0-9][0-9][0-9][0-9].[0-9]{1,2}.[0-9]+'  # Calver: YYYY.M.MINOR
 
 jobs:
   deploy:
@@ -724,11 +726,11 @@ When analyzing or generating workflows, ensure you:
 8. ✅ Use Mozilla-specific patterns shown above
 9. ✅ **NEVER use twine for PyPI publishing** - only use `pypa/gh-action-pypi-publish@release/v1`
 
+### Critical Rules:
+- **Tagged Deploys:** When CircleCI has tag filters, convert to GitHub Actions with BOTH `branches: [main]` AND `tags: ['[0-9][0-9][0-9][0-9].[0-9]{1,2}.[0-9]+']` in the `on.push` trigger
+- **Branch Safety:** ALWAYS add `if: github.ref_name == 'main' || github.event.base_ref == 'refs/heads/main'` to deployment jobs triggered by tags to ensure they only run from main branch
+- **PyPI Publishing:** NEVER install or use `twine`. Only use the `pypa/gh-action-pypi-publish@release/v1` action with OIDC authentication
+- **Credentials:** No API tokens or credentials should be used for PyPI - only OIDC via `id-token: write` permission
+- **Build Tools:** Only install `build` package for PyPI publishing, nothing else
+
 **Always generate complete, production-ready workflows following Mozilla's standards.**
-
-### Critical Rules
-
-- **PyPI Publishing:** NEVER install or use `twine`. Only use the `pypa/gh-action-pypi-publish@release/v1` action with OIDC authentication.
-- **Credentials:** No API tokens or credentials should be used for PyPI - only OIDC via `id-token: write` permission.
-- **Build Tools:** Only install `build` package for PyPI publishing, nothing else.
-- **Tagged Deploys:** ALWAYS add `if: github.ref_name == 'main' || github.event.base_ref == 'refs/heads/main'` to deployment jobs triggered by tags to ensure they only run from main branch.
