@@ -1,0 +1,74 @@
+# Example Successful Migration
+
+```yaml
+version: 2.1
+
+orbs:
+  gcp-gcr: circleci/gcp-gcr@0.11.0
+
+jobs:
+  test:
+    docker:
+      - image: cimg/python:3.11
+    steps:
+      - checkout
+      - run: make test
+  
+  build-push:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - gcp-gcr/build-and-push-image:
+          image: my-app
+          registry-url: gcr.io
+```
+
+After (GH Actions)
+
+```yaml
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - run: make test
+
+  build-push:
+    if: github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build . -t us-docker.pkg.dev/moz-fx-data-artifacts-prod/my-repo/my-app:latest
+      - name: Push to GAR
+        uses: mozilla-it/deploy-actions/docker-push@v4.3.2
+        with:
+          project_id: moz-fx-data-artifacts-prod
+          image_tags: us-docker.pkg.dev/moz-fx-data-artifacts-prod/my-repo/my-app:latest
+          workload_identity_pool_project_number: ${{ vars.GCPV2_WORKLOAD_IDENTITY_POOL_PROJECT_NUMBER }}
+          service_account_name: my-repo
+```
+
+Checklist:
+
+ Add my-repo to dataservices-infra GAR access list
+ Configure repository secrets: none needed (uses org-level vars)
+ Test workflow on a branch first
+ Verify Docker image pushes successfully
+
+ 
