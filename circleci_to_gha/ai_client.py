@@ -103,13 +103,25 @@ IMPORTANT INSTRUCTIONS:
 7. Preserve all job dependencies and workflow logic from CircleCI
 8. Use consistent naming: match CircleCI job names where possible
 
+CRITICAL OUTPUT REQUIREMENTS:
+- Return ONLY valid YAML workflow files - NO commentary, explanations, or notes
+- DO NOT add bullet points, markdown text, or explanations after the YAML
+- DO NOT include migration notes or changes documentation in the output
+- Each file should contain ONLY the workflow YAML, nothing else
+
 Return in this exact format:
 FILENAME: <filename.yml>
 ```yaml
-<complete workflow content>
+<complete workflow content - PURE YAML ONLY>
+```
+
+FILENAME: <next-file.yml>
+```yaml
+<complete workflow content - PURE YAML ONLY>
 ```
 
 Generate one workflow file per CircleCI workflow. Be consistent and deterministic.
+NO TEXT OR COMMENTARY AFTER THE YAML CODE BLOCKS.
 """
         response = self._call_gemini(prompt)
         return self._parse_workflows(response)
@@ -138,6 +150,8 @@ Include:
         Supports multiple formats:
         - FILENAME: name.yml followed by ```yaml code block
         - FILENAME: name.yml followed by raw YAML
+
+        Strips any non-YAML content (commentary, notes, etc.)
         """
         workflows = {}
         lines = response.split("\n")
@@ -152,9 +166,9 @@ Include:
             if line.startswith("FILENAME:"):
                 # Save previous workflow if exists
                 if current_file and current_content:
-                    # Clean up content - remove empty lines from start/end
-                    content = "\n".join(current_content).strip()
-                    workflows[current_file] = content
+                    content = self._clean_yaml_content(current_content)
+                    if content:  # Only save if there's actual content
+                        workflows[current_file] = content
 
                 # Extract new filename
                 current_file = line.replace("FILENAME:", "").strip()
@@ -165,21 +179,63 @@ Include:
                 in_code_block = True
 
             elif line.startswith("```") and in_code_block:
+                # End of code block - stop capturing
                 in_code_block = False
+                # Don't capture anything after the code block ends
 
-            elif current_file:
-                # If we're in a code block, or if there's no code block yet, capture content
-                if in_code_block or (not any(l.startswith("```") for l in lines[max(0, i-5):i])):
-                    current_content.append(line)
+            elif current_file and in_code_block:
+                # Only capture content inside code blocks
+                current_content.append(line)
 
             i += 1
 
         # Save last workflow
         if current_file and current_content:
-            content = "\n".join(current_content).strip()
-            workflows[current_file] = content
+            content = self._clean_yaml_content(current_content)
+            if content:
+                workflows[current_file] = content
 
         return workflows
+
+    def _clean_yaml_content(self, lines: list[str]) -> str:
+        """Clean and validate YAML content.
+
+        Removes any non-YAML lines like markdown bullet points or commentary.
+        """
+        cleaned_lines = []
+        for line in lines:
+            # Skip lines that look like markdown/commentary
+            stripped = line.strip()
+            if stripped.startswith(("*", "-", "•")) and ":" not in line:
+                # Skip markdown bullet points (unless they're YAML list items with colons)
+                continue
+            if stripped.startswith("#") and not line.startswith("#"):
+                # Skip markdown headings (but keep YAML comments)
+                continue
+
+            cleaned_lines.append(line)
+
+        # Join and strip whitespace
+        content = "\n".join(cleaned_lines).strip()
+
+        # Remove any trailing commentary after the last YAML line
+        # Look for the last line that looks like YAML
+        lines_list = content.split("\n")
+        last_yaml_idx = len(lines_list) - 1
+
+        for i in range(len(lines_list) - 1, -1, -1):
+            line = lines_list[i].strip()
+            if line and not line.startswith(("*", "-", "•", "**")):
+                # Found a line that might be YAML
+                if ":" in line or line.startswith("-") or not line:
+                    last_yaml_idx = i
+                    break
+
+        # Only keep content up to last YAML line
+        if last_yaml_idx < len(lines_list) - 1:
+            content = "\n".join(lines_list[:last_yaml_idx + 1])
+
+        return content.strip()
 
 
 def get_ai_client(project_id: str, location: str = "global") -> GeminiClient:

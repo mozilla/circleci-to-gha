@@ -32,10 +32,9 @@ def display_detected_requirements(metadata: dict) -> None:
 
 def display_workflow_list(workflows: dict) -> None:
     """Display the list of generated workflow files."""
-    console.print(f"\n[bold cyan]📝 Generated {len(workflows)} workflow file(s):[/bold cyan]")
+    console.print(f"[bold cyan]📝 Generated {len(workflows)} workflow file(s):[/bold cyan]")
     for filename in sorted(workflows.keys()):
         console.print(f"   • {filename}")
-    console.print()
 
 
 def display_workflow_content(workflows: dict, mode: str = "preview") -> None:
@@ -46,13 +45,15 @@ def display_workflow_content(workflows: dict, mode: str = "preview") -> None:
         mode: Either "preview" or "saved"
     """
     if mode == "preview":
-        header = "[bold yellow]Workflow Content (preview - not saved):[/bold yellow]"
+        header = "\n[bold yellow]Workflow Content (preview - not saved):[/bold yellow]"
     else:
-        header = "[bold green]Saved Workflow Content:[/bold green]"
+        header = "\n[bold green]Saved Workflow Content:[/bold green]"
 
-    console.print(f"\n{header}")
+    console.print(header)
     for name, content in sorted(workflows.items()):
-        console.print(f"\n[bold cyan]═══ {name} ═══[/bold cyan]")
+        console.print(f"\n[bold cyan]{'─' * 80}[/bold cyan]")
+        console.print(f"[bold cyan]File: {name}[/bold cyan]")
+        console.print(f"[bold cyan]{'─' * 80}[/bold cyan]")
         console.print(Markdown(f"```yaml\n{content}\n```"))
 
 
