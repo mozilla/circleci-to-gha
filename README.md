@@ -15,7 +15,7 @@ AI-powered tool to migrate CircleCI configurations to GitHub Actions, following 
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/circleci-to-gha.git
+git clone https://github.com/mozilla/circleci-to-gha.git
 cd circleci-to-gha
 
 # Install in development mode
