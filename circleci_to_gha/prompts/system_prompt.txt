@@ -420,19 +420,31 @@ jobs:
 
 ## PyPI Trusted Publishing
 
-Use OIDC instead of API tokens for secure PyPI publishing:
+Use OIDC instead of API tokens for secure PyPI publishing. **CRITICAL:** Only publish from main branch and on tags.
+
+### Recommended Pattern: Separate Workflow for Tags
+
+Create a dedicated workflow that ONLY runs on tags pushed to main:
 
 ```yaml
+name: Tagged Deploy
+
+on:
+  push:
+    tags:
+      - '*'  # Trigger on any tag
+
 jobs:
   deploy:
+    # CRITICAL: Verify we're on main branch even with tag trigger
+    if: github.ref_name == 'main' || github.event.base_ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
     environment:
       name: pypi
       url: https://pypi.org/p/<package-name>
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
@@ -446,6 +458,16 @@ jobs:
       - name: Publish distribution 📦 to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
 ```
+
+### CRITICAL Security Rule
+
+**ALWAYS ensure tags are created from main branch:**
+```yaml
+# At the job level
+if: github.ref_name == 'main' || github.event.base_ref == 'refs/heads/main'
+```
+
+This prevents accidental deployments from feature branches that have been tagged.
 
 ### Key Points for PyPI Publishing
 
@@ -471,11 +493,33 @@ The PyPI publish action replaces twine entirely. Twine is incompatible with OIDC
 ### PyPI Setup Requirements
 
 Before this workflow will work, configure PyPI Trusted Publishing:
-1. Go to PyPI → Your Project → Settings → Publishing
-2. Add GitHub as a trusted publisher
-3. Specify: owner, repository name, workflow filename, environment name
 
-**Important:** Trusted Publishing eliminates the need for PyPI API tokens or credentials. The GitHub Actions workflow authenticates directly with PyPI using OIDC.
+#### On PyPI:
+1. Go to https://pypi.org/manage/account/publishing/
+2. Add a new "pending publisher"
+3. Fill in:
+   - **PyPI Project Name**: Your package name (e.g., `mozilla-jetstream`)
+   - **Owner**: GitHub organization (e.g., `mozilla`)
+   - **Repository name**: Your repo name (e.g., `jetstream`)
+   - **Workflow name**: The workflow filename (e.g., `deploy.yml`)
+   - **Environment name**: `pypi` (must match the `environment:` in workflow)
+4. Save the pending publisher
+
+#### On GitHub:
+1. Go to repository → Settings → Environments
+2. Create a new environment named `pypi`
+3. (Optional) Add protection rules:
+   - Required reviewers for extra safety
+   - Limit to `main` branch only
+   - Wait timer before deployment
+
+**Important:**
+- Trusted Publishing eliminates the need for PyPI API tokens or credentials
+- The GitHub Actions workflow authenticates directly with PyPI using OIDC
+- **Always restrict PyPI publishing to main branch** using `if: github.ref == 'refs/heads/main'`
+
+**Reference:** For complete details, see the official guide:
+https://packaging.python.org/en/latest/guides/publishing-package-distribution-releases-using-github-actions-ci-cd-workflows/
 
 ---
 
@@ -687,3 +731,4 @@ When analyzing or generating workflows, ensure you:
 - **PyPI Publishing:** NEVER install or use `twine`. Only use the `pypa/gh-action-pypi-publish@release/v1` action with OIDC authentication.
 - **Credentials:** No API tokens or credentials should be used for PyPI - only OIDC via `id-token: write` permission.
 - **Build Tools:** Only install `build` package for PyPI publishing, nothing else.
+- **Tagged Deploys:** ALWAYS add `if: github.ref_name == 'main' || github.event.base_ref == 'refs/heads/main'` to deployment jobs triggered by tags to ensure they only run from main branch.
