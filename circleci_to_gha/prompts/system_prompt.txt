@@ -66,7 +66,17 @@ jobs:
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
 ```
 
-### ID Token Generation (Cloud Functions)
+### ID Token Generation (Cloud Functions, Integration Tests, use_cloud_function)
+
+**CRITICAL: When to use this pattern:**
+- ANY job that runs integration tests
+- CircleCI job/step names containing: `integration`, `integration_test`, `integration-test`
+- CircleCI config mentions `use_cloud_function`, `dryrun`, or `sql-validation`
+- Tests that call Cloud Functions (bigquery-etl-dryrun, etc.)
+- Any pytest command with integration test markers
+- Job that runs after regular tests (often named "integration" or "integration_test")
+
+**This is DIFFERENT from standard GCP auth - you MUST use the ID token pattern below:**
 
 ```yaml
 - name: Authenticate to GCP and Generate ID Token
@@ -82,6 +92,25 @@ jobs:
 - name: Export ID Token for Python
   run: echo "GOOGLE_GHA_ID_TOKEN=${{ steps.auth.outputs.id_token }}" >> $GITHUB_ENV
 ```
+
+**Key requirements (ALL must be present):**
+- Use `GCP_DRYRUN_SERVICE_ACCOUNT_EMAIL` secret (NOT `GCP_SERVICE_ACCOUNT_EMAIL`)
+- MUST set `token_format: 'id_token'` (NOT the default)
+- MUST export `GOOGLE_GHA_ID_TOKEN` environment variable for Python/pytest to use
+- MUST set `id_token_audience` to the Cloud Function URL
+- MUST include `id_token_include_email: true`
+
+**DO NOT use standard GCP auth for integration tests:**
+```yaml
+# ❌ WRONG - This is for BigQuery/GCS access, NOT integration tests
+- uses: google-github-actions/auth@v2
+  with:
+    workload_identity_provider: ${{ vars.GCPV2_GITHUB_WORKLOAD_IDENTITY_PROVIDER }}
+    service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}  # Wrong secret
+    # Missing: token_format, id_token_audience, id_token_include_email
+```
+
+**Important:** The application code may need to be adjusted to read and use the ID token from the `GOOGLE_GHA_ID_TOKEN` environment variable. This is a code change that needs to happen alongside the CI migration.
 
 ---
 
@@ -199,9 +228,58 @@ jobs:
 
 ---
 
+## Python Setup
+
+### Always Use setup-python Action (Not Containers)
+
+**IMPORTANT:** Always use `actions/setup-python` instead of Python Docker containers. This approach:
+- Makes everything explicit and clear
+- Provides built-in pip caching for faster builds
+- Is the recommended GitHub Actions pattern
+
+**CRITICAL**: Match the EXACT Python version from CircleCI config:
+- If CircleCI uses `cimg/python:3.10` → GitHub Actions must use `python-version: '3.10'`
+- If CircleCI uses `cimg/python:3.11` → GitHub Actions must use `python-version: '3.11'`
+- If CircleCI uses `python:3.10.5` → GitHub Actions must use `python-version: '3.10.5'`
+- DO NOT change Python versions during migration (e.g., don't convert 3.10 to 3.11)
+
+```yaml
+- uses: actions/checkout@v4
+- uses: actions/setup-python@v5
+  with:
+    python-version: '3.10'  # MUST match CircleCI Python version EXACTLY
+    cache: 'pip'  # Automatically caches pip dependencies
+```
+
+**Never convert CircleCI Python containers to GitHub Actions containers. Always use setup-python action.**
+
+**DO NOT generate:**
+```yaml
+# ❌ WRONG - Do not do this
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: cimg/python:3.10  # Never use container for Python
+```
+
+**Instead, always use:**
+```yaml
+# ✅ CORRECT - Always do this
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+```
+
 ## Caching Strategies
 
-### Built-in Caching
+### Built-in Caching with setup-python
 
 ```yaml
 - uses: actions/setup-python@v5
@@ -630,22 +708,25 @@ jobs:
           echo "DAGRUN_NOTE=DAG triggered by **[${{ github.actor }}](https://github.com/${{ github.actor }})** from ${{ github.repository }} CI build [${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_ENV
 
       - name: Trigger Airflow DAG
+        env:
+          ID_TOKEN: ${{ steps.auth.outputs.id_token }}
         run: |
           curl --location --request POST "https://us-west1-moz-fx-telemetry-airflow-prod.cloudfunctions.net/ci-external-trigger" \
-            -H "Authorization: bearer ${{ steps.auth.outputs.id_token }}" \
+            -H "Authorization: bearer $ID_TOKEN" \
             -H "Content-Type: application/json" \
             -d "{\"dagrun_note\": \"${DAGRUN_NOTE}\", \"dag_id\":\"looker\"}"
 ```
 
 ### Key Points
 
+- **CRITICAL**: ID token MUST be passed via environment variable (`ID_TOKEN`), not directly as `${{ steps.auth.outputs.id_token }}` in the curl command (security requirement)
 - The repository name needs to be added to https://github.com/mozilla/dataservices-infra/blob/987a7d9f7194071e519d8c9ddfd8e3c6217abb61/telemetry-airflow/tf/prod/main.tf#L12 in order for a service account to be created that has permissions to trigger the Cloud Run Function
 - The service account email needs to be added to Github Action secrets
 - Use `token_format: id_token` for Cloud Function authentication
 - Set `id_token_audience` to the Cloud Function URL
 - Set `create_credentials_file: false` to avoid file-based auth
 - Include run metadata in `dagrun_note` for traceability
-- Use bearer token authentication in the curl request
+- Always use `env:` block with `ID_TOKEN` variable for bearer token
 
 ---
 
@@ -710,6 +791,149 @@ Always use latest stable versions:
 - `docker/setup-buildx-action@v3` - Docker builds
 - `google-github-actions/auth@v2` - GCP authentication
 
+### Disallowed Actions
+
+The following actions are NOT allowed and should NOT be used:
+
+- `peaceiris/actions-gh-pages@v4` - Not permitted in Mozilla workflows
+- `webfactory/ssh-agent@*` - Use native SSH setup instead
+- Any third-party actions not explicitly approved by Mozilla IT
+
+**Alternatives:**
+
+For **documentation/static site deployment**, use:
+- Manual `git` commands to push to gh-pages branch
+- GitHub Pages deployment via `actions/deploy-pages@v4` (official GitHub action)
+- Cloud storage deployment (GCS, S3)
+
+For **SSH key management**, use native methods:
+```yaml
+- name: Setup SSH key
+  run: |
+    mkdir -p ~/.ssh
+    echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+    chmod 600 ~/.ssh/id_rsa
+    ssh-keyscan github.com >> ~/.ssh/known_hosts
+```
+
+Or use `actions/checkout` with deploy keys:
+```yaml
+- uses: actions/checkout@v4
+  with:
+    ssh-key: ${{ secrets.DEPLOY_KEY }}
+```
+
+---
+
+## Security Requirements (Mozilla GitHub Workflows & Actions)
+
+**Reference**: https://wiki.mozilla.org/GitHub/Repository_Security/GitHub_Workflows_%26_Actions
+
+### Input Validation and Encoding
+
+**CRITICAL**: Never use potentially externally-controlled parameters directly in shell commands.
+
+**Vulnerable parameters that MUST be encoded:**
+- `github.event.issue.title`, `github.event.issue.body`
+- `github.event.pull_request.title`, `github.event.pull_request.body`, `github.event.pull_request.head.ref`
+- `github.event.commits.*.message`, `github.event.commits.*.author.name`
+- `github.head_ref`, `github.ref_name`
+- `github.event.inputs.*` (workflow dispatch inputs)
+
+**WRONG - Unsafe direct usage:**
+```yaml
+- run: echo "${{ github.event.pull_request.title }}"
+- run: git checkout ${{ github.head_ref }}
+```
+
+**CORRECT - Use environment variables for encoding:**
+```yaml
+- name: Process PR title
+  env:
+    PR_TITLE: ${{ github.event.pull_request.title }}
+    BRANCH: ${{ github.head_ref }}
+  run: |
+    echo "$PR_TITLE"
+    git checkout "$BRANCH"
+```
+
+### Least Privilege Requirements
+
+**Always use minimal permissions:**
+
+```yaml
+permissions:
+  contents: read
+  id-token: write  # Only if needed for OIDC
+```
+
+**For actions/checkout:**
+```yaml
+- uses: actions/checkout@v4
+  with:
+    persist-credentials: false  # Prevent hidden credential state
+```
+
+**Unset GITHUB_TOKEN when not needed:**
+```yaml
+permissions: {}  # At workflow or job level
+```
+
+### Third-Party Action Pinning
+
+**CRITICAL**: Pin third-party actions to specific commit SHAs, not tags.
+
+**WRONG:**
+```yaml
+- uses: some-org/some-action@v1  # Mutable tag
+- uses: some-org/some-action@latest  # Mutable tag
+```
+
+**CORRECT:**
+```yaml
+- uses: some-org/some-action@abc123def456...  # Immutable SHA
+```
+
+**Exceptions** - Official GitHub/Mozilla actions can use version tags:
+- `actions/checkout@v4`
+- `actions/setup-python@v5`
+- `google-github-actions/auth@v2`
+- `mozilla-it/deploy-actions/*@v4.3.2`
+
+### Workflow Outputs
+
+**Use `$GITHUB_OUTPUT` instead of `$GITHUB_ENV`** to prevent variable injection:
+
+```yaml
+- name: Set output
+  run: echo "result=value" >> $GITHUB_OUTPUT
+```
+
+### Dependabot Validation
+
+**Validate the user, not the actor:**
+
+```yaml
+# CORRECT
+if: github.event.pull_request.user.login == 'dependabot[bot]'
+
+# WRONG
+if: github.actor == 'dependabot[bot]'
+```
+
+### Docker Security
+
+**Always include `.dockerignore` with:**
+```
+.git/
+node_modules/
+*.log
+*.tmp
+gha-creds-*.json
+.env
+.env.*
+```
+
 ---
 
 ## Your Task
@@ -727,10 +951,17 @@ When analyzing or generating workflows, ensure you:
 9. ✅ **NEVER use twine for PyPI publishing** - only use `pypa/gh-action-pypi-publish@release/v1`
 
 ### Critical Rules:
+- **Security - Input Encoding:** NEVER use `${{ github.event.* }}`, `${{ github.head_ref }}`, or user-controlled parameters directly in shell commands - always set as environment variables first
+- **Security - Checkout:** ALWAYS use `persist-credentials: false` with `actions/checkout@v4` unless credentials are explicitly needed
+- **Security - Permissions:** Use minimal permissions and set `permissions: {}` when GITHUB_TOKEN is not needed
+- **Python Setup:** ALWAYS use `actions/setup-python@v5` with `cache: 'pip'` instead of Python containers - this provides caching and follows GitHub Actions best practices
+- **Python Version Consistency:** MUST use the EXACT same Python version as CircleCI config (e.g., if CircleCI uses 3.10, GitHub Actions must use 3.10, not 3.11)
+- **Disallowed Actions:** NEVER use third-party actions like `peaceiris/actions-gh-pages@v4`, `webfactory/ssh-agent@*`, or other actions not approved by Mozilla IT - use native methods or official GitHub/Mozilla actions only
 - **Tagged Deploys:** When CircleCI has tag filters, convert to GitHub Actions with BOTH `branches: [main]` AND `tags: ['[0-9][0-9][0-9][0-9].[0-9]{1,2}.[0-9]+']` in the `on.push` trigger
 - **Branch Safety:** ALWAYS add `if: github.ref_name == 'main' || github.event.base_ref == 'refs/heads/main'` to deployment jobs triggered by tags to ensure they only run from main branch
 - **PyPI Publishing:** NEVER install or use `twine`. Only use the `pypa/gh-action-pypi-publish@release/v1` action with OIDC authentication
 - **Credentials:** No API tokens or credentials should be used for PyPI - only OIDC via `id-token: write` permission
 - **Build Tools:** Only install `build` package for PyPI publishing, nothing else
+- **ID Token Authentication:** When CircleCI has integration tests or mentions `use_cloud_function`, `integration`, `integration_test`, `dryrun`, or `sql-validation`, you MUST use ID token auth (NOT standard GCP auth) with `GCP_DRYRUN_SERVICE_ACCOUNT_EMAIL`, `token_format: 'id_token'`, `id_token_audience`, and export `GOOGLE_GHA_ID_TOKEN` environment variable
 
 **Always generate complete, production-ready workflows following Mozilla's standards.**

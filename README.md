@@ -89,7 +89,7 @@ Migration Analysis:
 
 ⚙️ Generating workflows from config.yml...
 
-✓ Workflows saved to /Users/anna/mydata/mozanalysis/.github/workflows
+✓ Workflows saved to .github/workflows
   - build.yml
   - deploy.yml
   - test.yml
