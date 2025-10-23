@@ -179,15 +179,7 @@ Save the checklist for tracking migration progress.
 
 ### Step 3: Create Infrastructure PR (if needed)
 
-If the analysis indicates Docker builds or Airflow DAG triggers:
-
-```bash
-# Generate PR content
-circleci-to-gha infra-pr your-repo-name > infra-pr-content.md
-
-# Create PR in dataservices-infra
-# Follow the instructions in the generated PR content
-```
+If the analysis indicates Docker builds or Airflow DAG triggers create PR in dataservices-infra or cloudops-infra.
 
 ### Step 4: Configure Repository Secrets
 
@@ -462,20 +454,6 @@ Options:
 ```
 
 **Note:** Generates checklists for all CircleCI configs found in the `.circleci` directory.
-
-#### `infra-pr`
-
-Generate dataservices-infra PR content for GAR access.
-
-```bash
-circleci-to-gha infra-pr REPO_NAME
-
-Arguments:
-  REPO_NAME  Repository name to add to GAR access list
-
-Options:
-  --help     Show this message and exit
-```
 
 ---
 
