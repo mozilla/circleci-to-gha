@@ -49,6 +49,11 @@ jobs:
           service_account_name: <repo_name>
 ```
 
+**Important Notes:**
+- Images are accessible at: `us-docker.pkg.dev/moz-fx-data-artifacts-prod/<repo_name>/<image_name>:<tag>`
+- If Airflow DAGs reference this image, update the telemetry-airflow repository with the new GAR image URL
+- Example: Change `gcr.io/...` to `us-docker.pkg.dev/moz-fx-data-artifacts-prod/<repo_name>/...`
+
 ---
 
 ## GCP Authentication
@@ -433,6 +438,7 @@ If CircleCI config builds and pushes Docker images, you need to add the reposito
 - Repository: https://github.com/mozilla/dataservices-infra
 - File: `data-artifacts/tf/prod/locals.tf`
 - Add repository name to the list
+- **After merging**: If Airflow DAGs use this image, update telemetry-airflow repo with new GAR image URL
 
 ### Airflow DAG Triggers → dataservices-infra PR
 If CircleCI config triggers Airflow DAGs, you need a service account:
