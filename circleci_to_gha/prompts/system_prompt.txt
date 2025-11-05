@@ -63,7 +63,7 @@ jobs:
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCPV2_GITHUB_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT_EMAIL }}
 ```
 
 ### ID Token Generation (Cloud Functions, Integration Tests, use_cloud_function)
@@ -84,7 +84,7 @@ jobs:
   uses: google-github-actions/auth@v2
   with:
     workload_identity_provider: ${{ vars.GCPV2_GITHUB_WORKLOAD_IDENTITY_PROVIDER }}
-    service_account: ${{ secrets.GCP_DRYRUN_SERVICE_ACCOUNT_EMAIL }}
+    service_account: ${{ vars.GCP_DRYRUN_SERVICE_ACCOUNT_EMAIL }}
     token_format: 'id_token'
     id_token_audience: 'https://us-central1-moz-fx-data-shared-prod.cloudfunctions.net/bigquery-etl-dryrun'
     id_token_include_email: true
@@ -106,7 +106,7 @@ jobs:
 - uses: google-github-actions/auth@v2
   with:
     workload_identity_provider: ${{ vars.GCPV2_GITHUB_WORKLOAD_IDENTITY_PROVIDER }}
-    service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}  # Wrong secret
+    service_account: ${{ vars.GCP_SERVICE_ACCOUNT_EMAIL }}  # Wrong secret
     # Missing: token_format, id_token_audience, id_token_include_email
 ```
 
@@ -661,7 +661,7 @@ Useful variables for workflows:
   uses: google-github-actions/auth@v2
   with:
     workload_identity_provider: ${{ vars.GCPV2_GITHUB_WORKLOAD_IDENTITY_PROVIDER }}
-    service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+    service_account: ${{ vars.GCP_SERVICE_ACCOUNT_EMAIL }}
     access_token_lifetime: 43200s  # 12 hours for long-running jobs
 
 - name: Set up GKE
@@ -696,7 +696,7 @@ jobs:
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCPV2_GITHUB_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT_EMAIL }}
           project_id: ${{ vars.GCLOUD_PROJECT }}
           token_format: id_token
           id_token_audience: https://us-west1-moz-fx-telemetry-airflow-prod.cloudfunctions.net/ci-external-trigger
